@@ -78,7 +78,7 @@ Built incrementally, starting cheap:
   `insurer` (life | pc) / `asset_manager` / `reit`, plus a `captive_finance` flag. Order:
   config overrides → strong keywords (REIT, Banks, Insurance) → gross interest income ÷
   revenue (>= 10% lender; in Capital Markets/Asset Management 10–80% broker-dealer, >= 80%
-  lender/BDC) → unmapped-interest test (interest < 0.5% but receivables >= 40% of assets →
+  lender subtype `bdc`; "REIT - Mortgage" is lender subtype `mreit`) → unmapped-interest test (interest < 0.5% but receivables >= 40% of assets →
   lender) → weak keywords → standard. Calibration and every override's reason live in
   `config.py`; overrides are always disclosed in reports. Captive finance = debt-funded
   receivables ((receivables − payables) >= 40% of assets AND debt >= 0.6× receivables), or
@@ -91,23 +91,28 @@ Built incrementally, starting cheap:
   Consequences:
   - `dcf.py` raises `ValueError` (→ "DCF unavailable: <reason>") for every non-`standard`
     model and for captive finance, cost of debt > `DCF_MAX_DERIVED_COST_OF_DEBT`,
-    non-positive base FCF and non-positive equity value. A derived cost of debt more than
+    non-positive base FCF, non-positive equity value, and a WACC below the risk-free rate
+    (raw low betas: TMUS 0.32 gave WACC 4.67% and +282%). A derived cost of debt more than
     `DCF_CAPTIVE_COD_GAP` below risk-free is replaced by risk-free + `DCF_DEBT_SPREAD`
     (marginal, not historical, cost — disclosed). Derived FCF growth is clamped. Output
     carries `terminalValueShare` and `sanityBandBreach` (outside `DCF_SANITY_BAND` × price).
   - Peer valuation (`relative_valuation.peer_valuation`) uses P/E (standard, asset
     managers), ROE-adjusted P/B (bank / lender / broker-dealer / insurer: warranted P/B =
-    peer P/B × (ROE_s − g)/(ROE_p − g); loss-making peers excluded from the P/B and ROE
-    aggregates; peer ROE must exceed g by `PEER_ROE_MIN_SPREAD` and the subject's ROE must
-    lie inside the peer ROE range — interpolation, not extrapolation — else "unreliable") or P/FFO (REITs). Peers share the subject's
+    peer P/B × (ROE_s − g)/(ROE_p − g), ROE = TTM earnings ÷ book for subject AND peers;
+    loss-making peers excluded; subject and peer ROE must each exceed g by
+    `PEER_ROE_MIN_SPREAD`; subject ROE within the peer range ± `PEER_ROE_RANGE_TOLERANCE`;
+    else "unreliable"). BDCs and mortgage REITs (`PLAIN_PB_SUBTYPES`) use plain P/B ≈
+    price/NAV against same-subtype peers — lender subtypes must match (ARCC was −48% against
+    card lenders). or P/FFO (REITs). Peers share the subject's
     business model and are operating equities; one scope at a time; Σ÷Σ + median; >=
     `PEER_TARGET_MIN_PEERS` usable peers (usability — e.g. no loss-makers for P/B — is
     checked DURING selection, so the search continues until enough are found) or no
     implied price.
   - **`valuation_summary.summarize_valuation` is the single rule** for which methods count
     and what the valuation verdict is; the report's price target AND the scorecard's
-    valuation signal both use it. Credible methods pointing to different verdicts →
-    "Indeterminate — methods disagree" (whichever is in band). Two agreeing methods with one
+    valuation signal both use it. Credible methods that disagree (one Attractive and one
+    Rich, or more than 30 points apart) → "Indeterminate — methods disagree", whichever is
+    in band; neighbouring verdicts close together (−9% vs −11%) agree. Two agreeing methods with one
     within ±`TARGET_MAX_SINGLE_METHOD_GAP` → point target, full score. Two agreeing, both
     beyond → "low precision" range. One method within the band → "(single method)". In both
     of those, the score is capped to `VALUATION_SCORE_CAP`. One method beyond the band →
@@ -117,10 +122,15 @@ Built incrementally, starting cheap:
     RBC/combined ratio unavailable); negative equity makes D/E and ROE "n/m"; captive
     finance leaves financial health unscored (consolidated current ratio, D/E and coverage all
     mix in the finance arm). Each adds an explicit risk line.
+- **Screener defaults:** `FMPClient.screen_companies` excludes ETFs and funds
+  (`isEtf`/`isFund=false`) because FMP's response flags are unreliable — "Asset Management"
+  returned 100 funds and no BDCs. Peer screens also run a size-banded pass per industry,
+  since the screener returns at most 100 rows, largest first.
 - **Data quality (`src/analysis/data_quality.py`).** Stub statement rows (latest period with
   equity and liabilities zero, or assets < `STUB_STATEMENT_ASSET_RATIO` of the prior period)
-  are never read as real: analyses fall back to the prior period and surface a "Data
-  quality" note (RJF FY2026 read as "$0 equity" before). Add new deterministic checks
+  are never read as real: analyses fall back to the prior period — balance sheet AND the
+  ratios/key metrics of that period, and FY book for peer P/B when TTM P/B is a stub — and
+  surface a "Data quality" note (RJF FY2026 read as "$0 equity" before). Add new deterministic checks
   here, never as silent corrections.
 - **Secrets never reach logs.** `get_logger` uses a redacting formatter
   (`apikey=`/`api_key=`/`token=` values → `***`), and client errors re-raise

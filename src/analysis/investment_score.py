@@ -91,8 +91,8 @@ def _score_valuation(
         notes.append(f"not scored: {summary.verdict}")
     elif summary.scoring == "capped" and score is not None:
         lo, hi = VALUATION_SCORE_CAP
-        if not lo <= score <= hi:
-            notes.append(f"score capped to {lo}–{hi} ({summary.precision} precision)")
+        basis = "single method" if summary.precision == "single" else "low precision"
+        notes.append(f"{basis} — score limited to {lo}–{hi}")
         score = min(max(score, lo), hi)
     return {"score": score, "rationale": "; ".join(notes) if notes else "Insufficient data", "detail": detail}
 

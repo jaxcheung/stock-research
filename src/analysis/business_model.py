@@ -62,13 +62,17 @@ class BusinessModel:
     kind: str
     reason: str
     captive_finance: bool = False
-    subtype: str | None = None  # insurers: "life" | "pc"
+    subtype: str | None = None  # insurers: "life" | "pc"; lenders: "bdc" | "mreit" | None
     override: str | None = None  # reason text when a config override was applied
 
     @property
     def label(self) -> str:
         if self.kind == "insurer" and self.subtype == "life":
             return "life insurer"
+        if self.subtype == "bdc":
+            return "business development company (BDC)"
+        if self.subtype == "mreit":
+            return "mortgage REIT"
         return _LABELS[self.kind]
 
     @property
@@ -168,6 +172,8 @@ def classify(
             subtype = None
             if kind == "insurer":
                 subtype = "life" if "life" in ind else "pc"
+            elif keyword == "REIT - Mortgage":
+                subtype = "mreit"
             return BusinessModel(kind, f"FMP industry '{industry}'", subtype=subtype)
 
     if sector == "Financial Services":
@@ -176,7 +182,11 @@ def classify(
             pct = f"interest income is {share:.0%} of revenue"
             if any(k.lower() in ind for k in BROKER_INDUSTRY_KEYWORDS):
                 if share >= BDC_INTEREST_INCOME_SHARE:
-                    return BusinessModel("lender", f"{pct} (>= {BDC_INTEREST_INCOME_SHARE:.0%}) — lender/BDC")
+                    return BusinessModel(
+                        "lender",
+                        f"{pct} (>= {BDC_INTEREST_INCOME_SHARE:.0%}) — BDC / closed-end lender",
+                        subtype="bdc",
+                    )
                 return BusinessModel("broker_dealer", f"{pct} — balance-sheet broker / wealth platform")
             return BusinessModel(
                 "lender", f"{pct} (>= {LENDER_INTEREST_INCOME_SHARE:.0%}) — earns a loan spread"

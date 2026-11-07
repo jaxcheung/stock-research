@@ -126,7 +126,15 @@ def summarize_valuation(
 
     # Credible methods pointing to different verdicts: no verdict, whichever one is in band
     # (GOOGL: peers +50% in band vs DCF -75% was "Attractive, 100/100").
-    if len(cats) > 1:
+    # Disagreement = opposite verdicts (one Attractive, one Rich) or a gap > 30 points.
+    # Neighbouring categories close together (-9% vs -11%) agree — they straddle a band edge.
+    ups = [m.upside for m in eligible if m.upside is not None]
+    disagree = len(ups) >= 2 and (
+        ("Attractive (undervalued)" in cats and "Rich (overvalued)" in cats) or max(ups) - min(ups) > 0.30
+    )
+    if disagree:
+        for m in eligible:
+            m.reason = m.reason or "credible methods disagree"
         return build(
             verdict="Indeterminate — methods disagree",
             precision="none",
@@ -158,7 +166,7 @@ def summarize_valuation(
         vals = sorted(m.value for m in eligible)
         nearest = min(eligible, key=lambda m: abs(m.upside or 0))
         return build(
-            verdict=f"{next(iter(cats))} — low precision",
+            verdict=f"{verdict_for(sum(ups) / len(ups))} — low precision",
             precision="low",
             scoring="capped",
             target=None,

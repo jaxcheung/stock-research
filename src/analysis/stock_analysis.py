@@ -34,11 +34,15 @@ def analyze_stock(symbol: str, client: FMPClient | None = None, years: int = 5) 
         logger.warning("%s: balance sheet unavailable (%s) — equity-based checks skipped", symbol, exc)
         balance = []
     latest_bs, bs_note = latest_complete_balance(balance)
+    # Ratios computed on a stub balance sheet (RJF FY2026: "ROE 0.0%") are not real — use the
+    # same prior period the balance-sheet fallback chose (data_quality.latest_complete_balance).
+    period = 1 if (bs_note and balance and latest_bs is not balance[0]) else 0
     if bs_note:
         logger.warning("%s: %s", symbol, bs_note)
-
-    latest_ratios = ratios[0] if ratios else {}
-    latest_metrics = key_metrics[0] if key_metrics else {}
+        if period:
+            bs_note += " Profitability and leverage ratios use the same prior period."
+    latest_ratios = ratios[period] if len(ratios) > period else {}
+    latest_metrics = key_metrics[period] if len(key_metrics) > period else {}
     latest_income = income[0] if income else {}
     prior_income = income[1] if len(income) > 1 else {}
 

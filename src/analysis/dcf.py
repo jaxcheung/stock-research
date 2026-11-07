@@ -240,6 +240,11 @@ def run_dcf(
     weight_debt = debt_weight
     wacc = weight_equity * cost_of_equity + weight_debt * cost_of_debt * (1 - effective_tax_rate)
 
+    if wacc < risk_free_rate:
+        raise ValueError(
+            f"{symbol}: WACC {wacc:.2%} is below the risk-free rate {risk_free_rate:.2%} (beta {beta:.2f}, "
+            f"cost of debt {cost_of_debt:.2%}) — the discount rate is implausible, so the DCF is not meaningful"
+        )
     if wacc <= terminal_growth_rate:
         raise ValueError(
             f"WACC ({wacc:.2%}) must exceed terminal growth rate "

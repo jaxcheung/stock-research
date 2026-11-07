@@ -39,6 +39,7 @@ from src.config import (
     PEER_ROE_MIN_SPREAD,
     PEER_ROE_RANGE_TOLERANCE,
     PEER_TARGET_MIN_PEERS,
+    PLAIN_PB_SUBTYPES,
     RELVAL_HISTORY_YEARS,
     RELVAL_MARKET_PROXY_MIN_CAP,
     RELVAL_MARKET_PROXY_SIZE,
@@ -154,6 +155,7 @@ def _company_row(symbol: str, client: FMPClient) -> dict[str, Any] | None:
         "currencyMismatch": mismatch,
         "reportingCurrency": reporting,
         "kind": model.kind,
+        "subtype": model.subtype,
         "kindReason": model.reason,
         # Industries whose companies count as "industry" peers: its own, plus the industries
         # FMP spreads this business model across (config), plus an override's peer industry.
@@ -161,7 +163,7 @@ def _company_row(symbol: str, client: FMPClient) -> dict[str, Any] | None:
             dict.fromkeys(
                 [profile.get("industry") or ""]
                 + list(BUSINESS_MODEL_OVERRIDES.get(symbol.upper(), {}).get("peer_industries", []))
-                + KIND_PEER_INDUSTRIES.get(model.kind, [])
+                + ([] if model.subtype in PLAIN_PB_SUBTYPES else KIND_PEER_INDUSTRIES.get(model.kind, []))
             )
         ),
         "captiveFinance": model.captive_finance,
@@ -200,6 +202,12 @@ def _similar_cap(rows: list[dict[str, Any]], cap: float | None) -> list[dict[str
     return sorted(rows, key=lambda r: abs(np.log((r.get("marketCap") or 1) / ref)))
 
 
+def _looks_like_mutual_fund(symbol: str) -> bool:
+    """US mutual-fund tickers are five letters ending in X (DODGX, PRIDX); the screener does
+    not always flag them as funds."""
+    return len(symbol) == 5 and symbol.isalpha() and symbol.endswith("X")
+
+
 def _peer_candidates(symbol: str, row: dict[str, Any], client: FMPClient) -> list[tuple[str, str]]:
     """Ordered (symbol, origin) candidates: same-industry US listings by cap
     similarity, then FMP stock-peers, then same-sector companies of similar
@@ -209,8 +217,9 @@ def _peer_candidates(symbol: str, row: dict[str, Any], client: FMPClient) -> lis
     major = ("NASDAQ", "NYSE", "AMEX")
 
     def screen(origin: str, **filters: Any) -> None:
+        filters.setdefault("marketCapMoreThan", 1_000_000_000)
         try:
-            rows = client.screen_companies(limit=100, marketCapMoreThan=1_000_000_000, **filters)
+            rows = client.screen_companies(limit=100, **filters)
         except FMPError as exc:
             logger.warning("Screener (%s) unavailable: %s", origin, exc)
             return
@@ -221,6 +230,7 @@ def _peer_candidates(symbol: str, row: dict[str, Any], client: FMPClient) -> lis
             and not r.get("isEtf")
             and not r.get("isFund")
             and is_operating_equity(r)  # no preferreds / baby bonds / notes (EP-PC, KKRS, MER-PK)
+            and not _looks_like_mutual_fund(r.get("symbol") or "")
         ]
         for r in rows:
             screened_caps[r["symbol"]] = r.get("marketCap")
@@ -229,9 +239,23 @@ def _peer_candidates(symbol: str, row: dict[str, Any], client: FMPClient) -> lis
     # Screen every peer industry, then order ALL industry candidates jointly by size
     # similarity: screened one industry after another, RJF's lookup budget was spent on
     # asset managers before any broker-dealer was reached.
+    cap0 = row.get("marketCap") or 0
     for ind in row.get("peerIndustries") or [row.get("industry")]:
         if ind:
             screen("industry", industry=ind)
+            # The screener returns at most 100 rows (largest first), so mid-size models in big
+            # industries (BDCs inside "Asset Management") need a size-banded screen too.
+            if cap0:
+                screen(
+                    "industry",
+                    industry=ind,
+                    marketCapMoreThan=int(max(cap0 * 0.2, 1_000_000_000)),
+                    marketCapLowerThan=int(cap0 * 5),
+                )
+    first: dict[str, tuple[str, str]] = {}
+    for c in cands:  # dedupe across screens, keeping each symbol's first occurrence
+        first.setdefault(c[0], c)
+    cands[:] = list(first.values())
     caps = {r_sym: c for r_sym, c in screened_caps.items()}
     cands.sort(key=lambda c: abs(np.log((caps.get(c[0]) or 1) / (row.get("marketCap") or 1))))
     try:
@@ -300,9 +324,12 @@ def _select_peers(
         if not is_operating_equity({"companyName": r["company"]}):  # FMP stock-peers aren't pre-screened
             continue
         # Same business model only: a card lender is not re-rated against V/MA (F3).
-        if r["kind"] != row.get("kind"):
+        # Lender subtypes (BDC, mortgage REIT) and insurer subtypes (life vs P&C) must match too.
+        sub_must_match = row.get("kind") == "lender" or r["kind"] == "lender"
+        if r["kind"] != row.get("kind") or (sub_must_match and r.get("subtype") != row.get("subtype")):
             if excluded_model is not None:
-                excluded_model.append(f"{sym} ({r['kind']})")
+                label = r["kind"] + (f"/{r['subtype']}" if r.get("subtype") else "")
+                excluded_model.append(f"{sym} ({label})")
             continue
         # FMP stock-peers span industries (JPM -> GS); the "Industry" set must stay one scope.
         if same_industry and r.get("industry") not in allowed:
@@ -759,6 +786,7 @@ class PeerValuation:
     # P/B only: justified-P/B scaling (ROE_s - g) / (ROE_p - g) applied to the peer aggregate
     roe_adjustment: float | None = None
     target_multiple: float | None = None
+    industries_screened: list[str] = field(default_factory=list)
     # False when the implied price rests on an assumption flagged in notes; the report
     # shows it but never blends it into a price target.
     reliable: bool = True
@@ -799,6 +827,7 @@ def peer_valuation(
 
     if method == "pb" and me.get("bookSource", "TTM") != "TTM":
         pv.notes.append(f"{symbol} book value taken from {me['bookSource']}.")
+    pv.industries_screened = [i for i in me.get("peerIndustries", []) if i]
     mcap, sub_den = me.get("marketCap"), me.get(den)
     pv.subject_multiple = float(mcap / sub_den) if (mcap and sub_den and sub_den > 0) else None
 
@@ -810,7 +839,11 @@ def peer_valuation(
     def require(r: dict[str, Any]) -> str | None:
         if r.get(den) is None or r.get("marketCap") is None:
             return f"no {spec['den_label']}"
-        if method == "pb" and (r.get("earnings") is None or r["earnings"] <= 0):
+        if (
+            method == "pb"
+            and me.get("subtype") not in PLAIN_PB_SUBTYPES
+            and (r.get("earnings") is None or r["earnings"] <= 0)
+        ):
             return "loss-making / no TTM earnings"
         return None
 
@@ -856,8 +889,19 @@ def peer_valuation(
         )
         pv.peer_aggregate = None
 
-    if method == "pb":
-        pv.subject_roe = me.get("roe")
+    plain_pb = method == "pb" and me.get("subtype") in PLAIN_PB_SUBTYPES
+    if plain_pb:
+        pv.method_label = "P/B (TTM) ≈ price / NAV"
+        kind_name = "BDC" if me.get("subtype") == "bdc" else "mortgage REIT"
+        pv.notes.append(
+            f"{symbol} is a {kind_name}: valued on plain P/B (≈ price / NAV, the industry-standard metric) "
+            "against same-subtype peers, without an ROE adjustment (GAAP ROE includes mark-to-market and "
+            "doesn't drive NAV-based pricing)."
+        )
+    elif method == "pb":
+        # One ROE definition for subject, peers and range: TTM earnings ÷ book (cap / P/B).
+        e, b = me.get("earnings"), me.get("book")
+        pv.subject_roe = (e / b) if (e is not None and b) else me.get("roe")
         with_e = chosen.dropna(subset=["earnings", "book"])
         tb = float(with_e["book"].sum()) if not with_e.empty else 0.0
         pv.peer_roe = float(with_e["earnings"].sum()) / tb if tb > 0 else None
@@ -874,20 +918,20 @@ def peer_valuation(
             and roe_lo - tol <= sr <= roe_hi + tol
         )
         if (
-            in_range
-            and sr is not None
-            and roe_lo is not None
-            and roe_hi is not None
-            and not roe_lo <= sr <= roe_hi
+            sr is not None
+            and pr is not None
+            and sr - g >= PEER_ROE_MIN_SPREAD
+            and pr - g >= PEER_ROE_MIN_SPREAD
+            and in_range
         ):
-            pv.notes.append(
-                f"ROE {sr:.1%} is just outside the peer range {roe_lo:.1%}–{roe_hi:.1%} (within the "
-                f"±{tol:.0%} tolerance) — a modest extrapolation; treat the warranted P/B as less precise."
-            )
-        if sr is not None and pr is not None and sr > g and pr - g >= PEER_ROE_MIN_SPREAD and in_range:
             # Gordon justified P/B = (ROE - g) / (r - g); relative to peers the cost of equity
             # cancels, so the subject's warranted P/B = peer P/B x (ROE_s - g) / (ROE_p - g).
             pv.roe_adjustment = (sr - g) / (pr - g)
+            if roe_lo is not None and roe_hi is not None and not roe_lo <= sr <= roe_hi:
+                pv.notes.append(
+                    f"ROE {sr:.1%} is just outside the peer range {roe_lo:.1%}–{roe_hi:.1%} (within the "
+                    f"±{tol:.0%} tolerance) — a modest extrapolation; treat the warranted P/B as less precise."
+                )
             pv.method_label = "P/B (TTM), ROE-adjusted"
             pv.notes.append(
                 f"P/B scaled for profitability: ROE {sr:.1%} vs peer aggregate {pr:.1%} → warranted P/B = "
@@ -902,8 +946,11 @@ def peer_valuation(
                 why = (
                     f"peer ROE {pr:.1%} is less than {PEER_ROE_MIN_SPREAD:.0%} above long-run growth {g:.1%}"
                 )
-            elif sr <= g:
-                why = f"subject ROE {sr:.1%} is below long-run growth"
+            elif sr - g < PEER_ROE_MIN_SPREAD:
+                why = (
+                    f"subject ROE {sr:.1%} is less than {PEER_ROE_MIN_SPREAD:.0%} above long-run growth "
+                    f"{g:.1%} — the (ROE − g) scaling collapses towards zero"
+                )
             elif roe_lo is None or roe_hi is None:
                 why = "peer ROE range unavailable"
             else:

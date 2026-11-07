@@ -257,6 +257,10 @@ class FMPClient:
         _validate_limit(limit)
         params = {k: v for k, v in filters.items() if v is not None}
         params.setdefault("isActivelyTrading", "true")
+        # Operating companies by default: without these, large industries such as "Asset
+        # Management" return 100 ETFs/mutual funds and no BDCs (the response flags are unreliable).
+        params.setdefault("isEtf", "false")
+        params.setdefault("isFund", "false")
         return self._get("company-screener", {**params, "limit": limit})
 
     # --- Reference lists (drive UI pickers; cached a day) ---

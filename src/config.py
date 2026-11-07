@@ -92,6 +92,8 @@ CAPTIVE_INTEREST_INCOME_SHARE = 0.05
 BUSINESS_MODEL_OVERRIDES: dict[str, dict[str, Any]] = {
     "CAT": {"captive": True, "reason": "Cat Financial; finance receivables not mapped by FMP"},
     "HOG": {"captive": True, "reason": "Harley-Davidson Financial Services"},
+    "HGV": {"captive": True, "reason": "timeshare receivables funded by securitised debt"},
+    "VAC": {"captive": True, "reason": "timeshare receivables funded by securitised debt"},
     "EQH": {
         "kind": "insurer",
         "subtype": "life",
@@ -118,7 +120,9 @@ KIND_PEER_INDUSTRIES: dict[str, list[str]] = {
         "Investment - Banking & Investment Services",
         "Asset Management",
     ],
-    "lender": ["Financial - Credit Services", "Asset Management"],  # BDCs file as Asset Management
+    # Card/consumer lenders only: BDCs (also "lender", subtype "bdc") are matched on subtype
+    # and screened in their own industry — pooling them with card lenders put ARCC at -48%.
+    "lender": ["Financial - Credit Services"],
 }
 
 # Peer-multiple valuation (relative_valuation.peer_valuation): method by business model.
@@ -195,6 +199,10 @@ PEER_ROE_MIN_SPREAD = 0.04
 # 17.9% vs big-bank peers 8.3-13.7%, SCHW +1.5pp, MET +1.5pp) and a strict range rejected
 # every one of them. Beyond range + tolerance the P/B re-rating is "unreliable" (AXP).
 PEER_ROE_RANGE_TOLERANCE = 0.05
+# Lender subtypes valued on plain P/B (≈ price / NAV — the industry-standard metric), with no
+# ROE adjustment: GAAP ROE includes mark-to-market for mortgage REITs, and a BDC's value is
+# its NAV and dividend, not a card lender's ROE.
+PLAIN_PB_SUBTYPES = ("bdc", "mreit")
 
 # Valuation signal scores (0-100) are clamped to this range unless the verdict rests on at
 # least two agreeing methods with one inside the band (no extreme scores on thin evidence).

@@ -93,7 +93,18 @@ def _valuation_verdict(target: ValuationSummary, current_price: float | None) ->
 
 
 def _reconcile(rating: str, valuation_verdict: str) -> str:
-    """Explicit rating-vs-valuation reconciliation (three-way, not a sign test)."""
+    """Explicit rating-vs-valuation reconciliation (three-way, not a sign test). A verdict
+    resting on one method says so — "quality and price agree" needs a confirmed price view."""
+    text = _reconcile_core(rating, valuation_verdict)
+    if "(single method)" in valuation_verdict or "low precision" in valuation_verdict:
+        qualifier = (
+            "one unconfirmed method" if "(single method)" in valuation_verdict else "imprecise estimates"
+        )
+        text = f"On {qualifier}: " + text[0].lower() + text[1:]
+    return text
+
+
+def _reconcile_core(rating: str, valuation_verdict: str) -> str:
     good_business = rating in ("Strong Buy", "Buy")
     weak_business = rating in ("Sell", "Strong Sell")
     cheap = valuation_verdict.startswith("Attractive")
@@ -123,6 +134,8 @@ def _peer_section(report: dict[str, Any]) -> list[str]:
         f"*Method: {pv.method_label} — chosen for a {pv.kind.replace('_', ' ')} business. "
         f"Peer set: {pv.scope or 'none'} (same business model, US listings, operating equities only).*"
     ]
+    if pv.industries_screened and pv.scope == "Industry peers":
+        out.append("- FMP industries screened: " + "; ".join(pv.industries_screened))
     f = lambda v: f"{v:.2f}×" if v is not None else "n/a"  # noqa: E731
     if pv.n:
         out.append(
@@ -140,13 +153,19 @@ def _peer_section(report: dict[str, Any]) -> list[str]:
     if pv.excluded_fx:
         out.append("- Excluded (quote/reporting currency mismatch): " + ", ".join(pv.excluded_fx))
     if not pv.peers.empty:
-        out.append("| Symbol | Market cap | P/E | P/B | ROE |")
-        out.append("|---|---|---|---|---|")
+        out.append(
+            "| Symbol | FMP industry | Market cap | P/E | P/B | ROE (TTM earnings ÷ book) | Book source |"
+        )
+        out.append("|---|---|---|---|---|---|---|")
         for _, r in pv.peers.iterrows():
             pe = f"{r['pe']:.1f}" if pd.notna(r.get("pe")) else "n/a"
             pb = f"{r['pb']:.2f}" if pd.notna(r.get("pb")) else "n/a"
-            roe = f"{r['roe']:.1%}" if pd.notna(r.get("roe")) else "n/a"
-            out.append(f"| {r['symbol']} | {money(r.get('marketCap'))} | {pe} | {pb} | {roe} |")
+            e, b = r.get("earnings"), r.get("book")
+            roe = f"{e / b:.1%}" if pd.notna(e) and pd.notna(b) and b else "n/a"
+            out.append(
+                f"| {r['symbol']} | {r.get('industry') or ''} | {money(r.get('marketCap'))} | {pe} | {pb} | {roe} "
+                f"| {r.get('bookSource') or 'TTM'} |"
+            )
     return out
 
 
@@ -309,7 +328,7 @@ def render_research_report(
             f"  |  Target: ${target.target:.2f} ({target.method_text})"
             if target.target is not None
             else (
-                f"  |  Indicative: {_fmt_range(target.target_range)} ({target.precision} precision)"
+                f"  |  Indicative only, not a target: {_fmt_range(target.target_range)} ({target.precision} precision)"
                 if target.target_range is not None
                 else ""
             )
