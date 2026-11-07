@@ -19,6 +19,7 @@
 #   is deliberately not a Buy/Sell rating (see CLAUDE.md: quality rating and
 #   valuation verdict are separate questions).
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any
@@ -27,19 +28,23 @@ import numpy as np
 import pandas as pd
 
 from src.analysis.business_model import classify
+from src.analysis.data_quality import latest_complete_balance
 from src.config import (
+    BUSINESS_MODEL_OVERRIDES,
     DCF_TERMINAL_GROWTH_RATE,
+    KIND_PEER_INDUSTRIES,
     PEER_EPS_TTM_DIVERGENCE,
     PEER_METHOD_BY_KIND,
-    PEER_ROE_ADJ_BOUNDS,
     PEER_ROE_GAP_CAVEAT_PP,
     PEER_ROE_MIN_SPREAD,
+    PEER_ROE_RANGE_TOLERANCE,
     PEER_TARGET_MIN_PEERS,
     RELVAL_HISTORY_YEARS,
     RELVAL_MARKET_PROXY_MIN_CAP,
     RELVAL_MARKET_PROXY_SIZE,
     RELVAL_MAX_MEANINGFUL_PE,
     RELVAL_MAX_PEERS,
+    RELVAL_MIN_LOOKUPS,
     RELVAL_MIN_MEANINGFUL_PEERS,
     RELVAL_SECTOR_PEERS,
 )
@@ -101,7 +106,7 @@ def _company_row(symbol: str, client: FMPClient) -> dict[str, Any] | None:
         logger.warning("Skipping %s: %s", symbol, exc)
         return None
     try:  # balance sheet only sharpens the business-model test (unmapped-interest lenders)
-        bal = client.get_balance_sheet(symbol, limit=1)
+        bal = client.get_balance_sheet(symbol, limit=2)
     except FMPError as exc:
         logger.warning("%s: balance sheet unavailable for classification: %s", symbol, exc)
         bal = []
@@ -112,8 +117,16 @@ def _company_row(symbol: str, client: FMPClient) -> dict[str, Any] | None:
     mismatch = bool(quote_ccy and reporting and quote_ccy != reporting)
     pe = None if mismatch else ttm.get("priceToEarningsRatioTTM")
     mcap = profile.get("marketCap")
-    model = classify(profile, inc[0] if inc else None, bal[0] if bal else None)
+    bal_row, bal_note = latest_complete_balance(bal)
+    model = classify(profile, inc[0] if inc else None, bal_row or None)
     pb = None if mismatch else ttm.get("priceToBookRatioTTM")
+    book_source = "TTM"
+    if not mismatch and (pb is None or pb <= 0) and mcap:
+        # FMP's TTM P/B is built from the latest balance sheet; when that is a stub (RJF:
+        # P/B 0) fall back to the last complete balance sheet's equity, and say so.
+        eq = (bal_row or {}).get("totalStockholdersEquity")
+        if eq and eq > 0 and bal_note:
+            pb, book_source = mcap / eq, f"FY {(bal_row or {}).get('date')} (latest balance sheet is a stub)"
     latest = inc[0] if inc else {}
     ni_fy, da_fy = latest.get("netIncome"), latest.get("depreciationAndAmortization")
     # FFO proxy (NAREIT FFO also adds back gains/losses on property sales — not available here).
@@ -142,10 +155,20 @@ def _company_row(symbol: str, client: FMPClient) -> dict[str, Any] | None:
         "reportingCurrency": reporting,
         "kind": model.kind,
         "kindReason": model.reason,
+        # Industries whose companies count as "industry" peers: its own, plus the industries
+        # FMP spreads this business model across (config), plus an override's peer industry.
+        "peerIndustries": list(
+            dict.fromkeys(
+                [profile.get("industry") or ""]
+                + list(BUSINESS_MODEL_OVERRIDES.get(symbol.upper(), {}).get("peer_industries", []))
+                + KIND_PEER_INDUSTRIES.get(model.kind, [])
+            )
+        ),
         "captiveFinance": model.captive_finance,
         "pb": pb,
         # Book value implied by cap / P/B (TTM); FFO and FY net income in reporting currency.
         "book": (mcap / pb) if (mcap and pb and pb > 0) else None,
+        "bookSource": book_source,
         "ffo": ffo,
         "netIncomeFY": None if mismatch else ni_fy,
     }
@@ -182,6 +205,7 @@ def _peer_candidates(symbol: str, row: dict[str, Any], client: FMPClient) -> lis
     similarity, then FMP stock-peers, then same-sector companies of similar
     size (0.2x-5x cap) as a fallback for thin industries (e.g. AAPL)."""
     cands: list[tuple[str, str]] = []
+    screened_caps: dict[str, float | None] = {}
     major = ("NASDAQ", "NYSE", "AMEX")
 
     def screen(origin: str, **filters: Any) -> None:
@@ -198,9 +222,18 @@ def _peer_candidates(symbol: str, row: dict[str, Any], client: FMPClient) -> lis
             and not r.get("isFund")
             and is_operating_equity(r)  # no preferreds / baby bonds / notes (EP-PC, KKRS, MER-PK)
         ]
+        for r in rows:
+            screened_caps[r["symbol"]] = r.get("marketCap")
         cands.extend((r["symbol"], origin) for r in _similar_cap(rows, row.get("marketCap")))
 
-    screen("industry", industry=row.get("industry"))
+    # Screen every peer industry, then order ALL industry candidates jointly by size
+    # similarity: screened one industry after another, RJF's lookup budget was spent on
+    # asset managers before any broker-dealer was reached.
+    for ind in row.get("peerIndustries") or [row.get("industry")]:
+        if ind:
+            screen("industry", industry=ind)
+    caps = {r_sym: c for r_sym, c in screened_caps.items()}
+    cands.sort(key=lambda c: abs(np.log((caps.get(c[0]) or 1) / (row.get("marketCap") or 1))))
     try:
         cands.extend((p["symbol"], "FMP peers") for p in client.get_stock_peers(symbol) if p.get("symbol"))
     except FMPError as exc:
@@ -241,13 +274,19 @@ def _select_peers(
     max_peers: int,
     same_industry: bool = False,
     excluded_model: list[str] | None = None,
+    require: Callable[[dict[str, Any]], str | None] | None = None,
+    excluded_require: list[str] | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
-    """Evaluate candidates in order until `max_peers` currency-consistent
-    peers are found (at most 3x max_peers lookups). Returns (peers, excluded)."""
+    """Evaluate candidates in order until `max_peers` currency-consistent peers are found
+    (at most 4x max_peers lookups). `require(row)` returns a reason to skip a peer that
+    is otherwise valid (e.g. loss-making for P/B) — applied DURING selection, so the
+    search keeps going until `max_peers` usable peers exist (it ran after the cap and
+    left SCHW with 4 of 5). Returns (peers, excluded-for-currency)."""
     chosen: list[dict[str, Any]] = []
     excluded: list[str] = []
     names: set[str] = {row.get("company") or ""}
-    for sym, origin in candidates[: max_peers * 3]:
+    allowed = set(row.get("peerIndustries") or [row.get("industry")])
+    for sym, origin in candidates[: max(max_peers * 4, RELVAL_MIN_LOOKUPS)]:
         if len(chosen) >= max_peers:
             break
         r = _company_row(sym, client)
@@ -266,8 +305,14 @@ def _select_peers(
                 excluded_model.append(f"{sym} ({r['kind']})")
             continue
         # FMP stock-peers span industries (JPM -> GS); the "Industry" set must stay one scope.
-        if same_industry and r.get("industry") != row.get("industry"):
+        if same_industry and r.get("industry") not in allowed:
             continue
+        if require is not None:
+            why = require(r)
+            if why:
+                if excluded_require is not None:
+                    excluded_require.append(f"{sym} ({why})")
+                continue
         names.add(r["company"])
         r["origin"] = origin
         chosen.append(r)
@@ -719,22 +764,6 @@ class PeerValuation:
     reliable: bool = True
 
 
-def _usable(df: pd.DataFrame, den: str, method: str) -> tuple[pd.DataFrame, list[str]]:
-    """Peers usable for the method, plus symbols dropped as loss-making (P/B only).
-
-    For P/B a loss-making peer distorts both aggregates the ROE adjustment rests on — one
-    crypto-treasury company's mark-to-market loss moved SCHW from +5% to +74%."""
-    if df.empty or den not in df.columns:
-        return pd.DataFrame(), []
-    usable = df.dropna(subset=["marketCap", den])
-    dropped: list[str] = []
-    if method == "pb":
-        loss = usable["earnings"].isna() | (usable["earnings"] <= 0)
-        dropped = [str(x) for x in usable.loc[loss, "symbol"]]
-        usable = usable[~loss]
-    return usable, dropped
-
-
 def _multiple_stats(df: pd.DataFrame, den: str, method: str) -> tuple[float | None, float | None]:
     """(Σ cap ÷ Σ denominator, median of positive per-company multiples)."""
     total = float(df[den].sum())
@@ -768,6 +797,8 @@ def peer_valuation(
         )
         return pv
 
+    if method == "pb" and me.get("bookSource", "TTM") != "TTM":
+        pv.notes.append(f"{symbol} book value taken from {me['bookSource']}.")
     mcap, sub_den = me.get("marketCap"), me.get(den)
     pv.subject_multiple = float(mcap / sub_den) if (mcap and sub_den and sub_den > 0) else None
 
@@ -775,26 +806,37 @@ def peer_valuation(
     ind_cands = [c for c in cands if c[1] != "sector, similar size"]
     sec_cands = [c for c in cands if c[1] == "sector, similar size"]
     chosen = pd.DataFrame()
+
+    def require(r: dict[str, Any]) -> str | None:
+        if r.get(den) is None or r.get("marketCap") is None:
+            return f"no {spec['den_label']}"
+        if method == "pb" and (r.get("earnings") is None or r["earnings"] <= 0):
+            return "loss-making / no TTM earnings"
+        return None
+
     for scope, pool, same_ind in (
         ("Industry peers", ind_cands, True),
         ("Sector peers (size-matched)", sec_cands, False),
     ):
+        skipped: list[str] = []
         df, fx = _select_peers(
-            pool, me, client, max_peers, same_industry=same_ind, excluded_model=pv.excluded_model
+            pool,
+            me,
+            client,
+            max_peers,
+            same_industry=same_ind,
+            excluded_model=pv.excluded_model,
+            require=require,
+            excluded_require=skipped,
         )
         pv.excluded_fx += fx
-        usable, loss_makers = _usable(df, den, method)
-        if len(usable) >= PEER_TARGET_MIN_PEERS:
-            chosen, pv.scope = usable, scope
-            if loss_makers:
-                pv.notes.append(
-                    "Excluded from the P/B and ROE aggregates as loss-making or without TTM earnings: "
-                    + ", ".join(loss_makers)
-                )
+        if len(df) >= PEER_TARGET_MIN_PEERS:
+            chosen, pv.scope = df, scope
+            if skipped:
+                pv.notes.append("Skipped during peer selection: " + ", ".join(skipped))
             break
         pv.notes.append(
-            f"{scope}: only {len(usable)} usable peer(s) with {spec['den_label']} "
-            f"(minimum {PEER_TARGET_MIN_PEERS})."
+            f"{scope}: only {len(df)} usable peer(s) with {spec['den_label']} (minimum {PEER_TARGET_MIN_PEERS})."
         )
     pv.excluded_fx = list(dict.fromkeys(pv.excluded_fx))
     pv.excluded_model = list(dict.fromkeys(pv.excluded_model))
@@ -821,16 +863,28 @@ def peer_valuation(
         pv.peer_roe = float(with_e["earnings"].sum()) / tb if tb > 0 else None
         g = DCF_TERMINAL_GROWTH_RATE
         sr, pr = pv.subject_roe, pv.peer_roe
-        lo_adj, hi_adj = PEER_ROE_ADJ_BOUNDS
-        factor = (sr - g) / (pr - g) if sr is not None and pr is not None and pr - g > 0 else None
-        if (
+        peer_roes = (chosen["earnings"] / chosen["book"]).dropna()
+        roe_lo = float(peer_roes.min()) if not peer_roes.empty else None
+        roe_hi = float(peer_roes.max()) if not peer_roes.empty else None
+        tol = PEER_ROE_RANGE_TOLERANCE
+        in_range = (
             sr is not None
-            and pr is not None
-            and factor is not None
-            and sr > g
-            and pr - g >= PEER_ROE_MIN_SPREAD
-            and lo_adj <= factor <= hi_adj
+            and roe_lo is not None
+            and roe_hi is not None
+            and roe_lo - tol <= sr <= roe_hi + tol
+        )
+        if (
+            in_range
+            and sr is not None
+            and roe_lo is not None
+            and roe_hi is not None
+            and not roe_lo <= sr <= roe_hi
         ):
+            pv.notes.append(
+                f"ROE {sr:.1%} is just outside the peer range {roe_lo:.1%}–{roe_hi:.1%} (within the "
+                f"±{tol:.0%} tolerance) — a modest extrapolation; treat the warranted P/B as less precise."
+            )
+        if sr is not None and pr is not None and sr > g and pr - g >= PEER_ROE_MIN_SPREAD and in_range:
             # Gordon justified P/B = (ROE - g) / (r - g); relative to peers the cost of equity
             # cancels, so the subject's warranted P/B = peer P/B x (ROE_s - g) / (ROE_p - g).
             pv.roe_adjustment = (sr - g) / (pr - g)
@@ -842,15 +896,22 @@ def peer_valuation(
             )
         else:
             pv.reliable = False
-            why = (
-                "subject or peer ROE unavailable"
-                if sr is None or pr is None
-                else f"peer ROE {pr:.1%} is less than {PEER_ROE_MIN_SPREAD:.0%} above long-run growth {g:.1%}"
-                if pr - g < PEER_ROE_MIN_SPREAD
-                else f"subject ROE {sr:.1%} is below long-run growth"
-                if sr <= g
-                else f"adjustment factor {factor:.2f}× is outside {lo_adj:g}×–{hi_adj:g}×"
-            )
+            if sr is None or pr is None:
+                why = "subject or peer ROE unavailable"
+            elif pr - g < PEER_ROE_MIN_SPREAD:
+                why = (
+                    f"peer ROE {pr:.1%} is less than {PEER_ROE_MIN_SPREAD:.0%} above long-run growth {g:.1%}"
+                )
+            elif sr <= g:
+                why = f"subject ROE {sr:.1%} is below long-run growth"
+            elif roe_lo is None or roe_hi is None:
+                why = "peer ROE range unavailable"
+            else:
+                why = (
+                    f"subject ROE {sr:.1%} is outside the peer ROE range {roe_lo:.1%}–{roe_hi:.1%} "
+                    f"even with a ±{tol:.0%} tolerance — "
+                    "the adjustment would extrapolate beyond comparable businesses"
+                )
             pv.notes.append(
                 f"P/B not ROE-adjusted ({why}) — the plain P/B re-rating is shown for reference only "
                 "and is not used in the price target or the valuation signal."

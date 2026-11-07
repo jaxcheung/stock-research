@@ -73,12 +73,20 @@ BUSINESS_MODEL_WEAK_KEYWORDS: list[tuple[str, str]] = [
     ("Financial - Mortgages", "lender"),
     ("Asset Management", "asset_manager"),
 ]
-# Captive finance (non-financial companies with a lending arm): receivables at least this
-# share of total assets (PCAR 49%, DE 54%; highest non-captive control ABNB 32%), OR
-# derived cost of debt more than DCF_CAPTIVE_COD_GAP below the risk-free rate while debt
-# exceeds DCF_CAPTIVE_DEBT_WEIGHT of capital (F 0.75% / 77%, GM 0.56% / 64%). A low cost of
-# debt alone is NOT a signal: GOOGL, META, XOM, MSFT all derive < 2.5% from legacy coupons.
-CAPTIVE_RECEIVABLES_SHARE = 0.40
+# Captive finance (non-financial companies with a lending arm). Any one of:
+#  (1) DEBT-FUNDED receivables: (receivables - payables) >= CAPTIVE_NET_RECEIVABLES_SHARE of
+#      assets AND debt >= CAPTIVE_DEBT_TO_RECEIVABLES x receivables. Calibrated 2026-11-07:
+#      captives PCAR 44% / 0.72, DE 51% / 1.12, CNH 50% / 1.15; trade-receivables businesses
+#      fail one leg: CHRW 25%, MAN 22%, ARW 8%, AVT 5%, KFRC 41% but 0.44, ABNB 31%.
+#      (Receivables alone flagged freight brokers, staffing firms and distributors.)
+#  (2) derived cost of debt more than DCF_CAPTIVE_COD_GAP below risk-free while debt exceeds
+#      DCF_CAPTIVE_DEBT_WEIGHT of capital (F 0.75% / 77%, GM 0.56% / 64%).
+#  (3) interest income >= CAPTIVE_INTEREST_INCOME_SHARE of revenue while debt exceeds
+#      DCF_CAPTIVE_DEBT_WEIGHT of capital (KMX 7.2% / 71%; ABNB 5.7% but 2% debt weight).
+# A low cost of debt alone is NOT a signal: GOOGL, META, XOM, MSFT derive < 2.5% from coupons.
+CAPTIVE_NET_RECEIVABLES_SHARE = 0.40
+CAPTIVE_DEBT_TO_RECEIVABLES = 0.60
+CAPTIVE_INTEREST_INCOME_SHARE = 0.05
 # Disclosed backstop for misfires the rules can't see from FMP data. Every applied
 # override is shown in reports. Keys: kind (optional), captive (bool), subtype, reason.
 BUSINESS_MODEL_OVERRIDES: dict[str, dict[str, Any]] = {
@@ -87,16 +95,30 @@ BUSINESS_MODEL_OVERRIDES: dict[str, dict[str, Any]] = {
     "EQH": {
         "kind": "insurer",
         "subtype": "life",
+        "peer_industries": ["Insurance - Life"],
         "reason": "life & annuity insurer filed as Asset Management",
     },
     "PFG": {
         "kind": "insurer",
         "subtype": "life",
+        "peer_industries": ["Insurance - Life"],
         "reason": "life & retirement insurer filed as Asset Management",
     },
     "FCFS": {"kind": "lender", "reason": "pawn lender; loans not mapped to receivables or interest income"},
     "EZPW": {"kind": "lender", "reason": "pawn lender; loans not mapped to receivables or interest income"},
     "ECPG": {"kind": "lender", "reason": "debt buyer; portfolio income not mapped as interest income"},
+}
+
+# Extra FMP industries screened for "industry" peers of a business model, because FMP
+# spreads that model across several industries (RJF/AMP sit in Asset Management, SCHW in
+# Capital Markets, IBKR in Investment Banking). Peers must still match the model.
+KIND_PEER_INDUSTRIES: dict[str, list[str]] = {
+    "broker_dealer": [
+        "Financial - Capital Markets",
+        "Investment - Banking & Investment Services",
+        "Asset Management",
+    ],
+    "lender": ["Financial - Credit Services", "Asset Management"],  # BDCs file as Asset Management
 }
 
 # Peer-multiple valuation (relative_valuation.peer_valuation): method by business model.
@@ -165,10 +187,23 @@ SCORE_WEIGHTS = {
 EQUITY_TO_ASSETS_BANDS = [(0.12, 100), (0.10, 80), (0.08, 60), (0.06, 30), (float("-inf"), 10)]
 
 # Peer P/B ROE adjustment safeguards: peers with negative TTM earnings are excluded from
-# the P/B and ROE aggregates; peer ROE must exceed long-run growth by at least this; the
-# (ROE_s - g)/(ROE_p - g) factor must fall in this range, else the result is not blended.
+# the P/B and ROE aggregates; peer ROE must exceed long-run growth by at least this; and the
+# subject's ROE must lie within the range of peer ROEs (interpolation, not extrapolation —
+# a bound on the adjustment factor measured the wrong thing: it hid AXP, admitted SYF).
 PEER_ROE_MIN_SPREAD = 0.04
-PEER_ROE_ADJ_BOUNDS = (0.33, 3.0)
+# Tolerance around the peer ROE range: industry leaders sit just above their peers (JPM
+# 17.9% vs big-bank peers 8.3-13.7%, SCHW +1.5pp, MET +1.5pp) and a strict range rejected
+# every one of them. Beyond range + tolerance the P/B re-rating is "unreliable" (AXP).
+PEER_ROE_RANGE_TOLERANCE = 0.05
+
+# Valuation signal scores (0-100) are clamped to this range unless the verdict rests on at
+# least two agreeing methods with one inside the band (no extreme scores on thin evidence).
+VALUATION_SCORE_CAP = (15, 85)
+
+# Data quality: a latest-period balance sheet whose total assets are below this fraction of
+# the prior period's (or with zero equity AND zero liabilities) is a stub row (RJF FY2026:
+# 3 non-zero fields) — analyses fall back to the prior period and say so.
+STUB_STATEMENT_ASSET_RATIO = 0.10
 
 # Composite score (0-100) -> rating thresholds
 SCORE_RATING_BANDS = [
@@ -379,6 +414,7 @@ RATE_SENSITIVITY_MIN_MARKET_CAP = 1_000_000_000  # screened universes only
 # Relative valuation (stock PE vs peers vs industry vs sector vs market)
 RELVAL_MAX_PEERS = 15
 RELVAL_SECTOR_PEERS = 8  # size-matched same-sector reference set (never blended with industry peers)
+RELVAL_MIN_LOOKUPS = 30  # candidate lookups per peer set, at least (sparse models need more)
 RELVAL_MIN_MEANINGFUL_PEERS = 3  # below this, the sector set becomes the primary benchmark
 RELVAL_MARKET_PROXY_SIZE = 30  # N largest US companies forming the market P/E aggregate
 RELVAL_MARKET_PROXY_MIN_CAP = 100_000_000_000  # screener floor for the market proxy

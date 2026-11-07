@@ -3,6 +3,7 @@
 from typing import Any
 
 from src.analysis.business_model import classify
+from src.analysis.data_quality import latest_complete_balance
 from src.analysis.dcf import live_risk_free_rate
 from src.data.fmp_client import FMPClient, FMPError
 from src.utils.logging import get_logger
@@ -28,11 +29,13 @@ def analyze_stock(symbol: str, client: FMPClient | None = None, years: int = 5) 
     ratios = client.get_ratios(symbol, limit=years)
     key_metrics = client.get_key_metrics(symbol, limit=years)
     try:
-        balance = client.get_balance_sheet(symbol, limit=1)
+        balance = client.get_balance_sheet(symbol, limit=2)
     except FMPError as exc:
         logger.warning("%s: balance sheet unavailable (%s) — equity-based checks skipped", symbol, exc)
         balance = []
-    latest_bs = balance[0] if balance else {}
+    latest_bs, bs_note = latest_complete_balance(balance)
+    if bs_note:
+        logger.warning("%s: %s", symbol, bs_note)
 
     latest_ratios = ratios[0] if ratios else {}
     latest_metrics = key_metrics[0] if key_metrics else {}
@@ -77,6 +80,7 @@ def analyze_stock(symbol: str, client: FMPClient | None = None, years: int = 5) 
         "quoteCurrency": quote_currency,
         "reportingCurrency": reporting_currency,
         "currencyMismatch": currency_mismatch,
+        "dataNotes": [bs_note] if bs_note else [],
         "businessModel": model.kind,
         "businessModelReason": model.reason,
         "captiveFinance": model.captive_finance,

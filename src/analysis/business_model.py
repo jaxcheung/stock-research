@@ -31,7 +31,9 @@ from src.config import (
     BUSINESS_MODEL_OVERRIDES,
     BUSINESS_MODEL_STRONG_KEYWORDS,
     BUSINESS_MODEL_WEAK_KEYWORDS,
-    CAPTIVE_RECEIVABLES_SHARE,
+    CAPTIVE_DEBT_TO_RECEIVABLES,
+    CAPTIVE_INTEREST_INCOME_SHARE,
+    CAPTIVE_NET_RECEIVABLES_SHARE,
     DCF_CAPTIVE_COD_GAP,
     DCF_CAPTIVE_DEBT_WEIGHT,
     DCF_RISK_FREE_RATE,
@@ -99,21 +101,38 @@ def receivables_share(balance: dict[str, Any] | None) -> float | None:
 def _captive(
     profile: dict[str, Any], income: dict[str, Any] | None, balance: dict[str, Any] | None, rf: float
 ) -> str | None:
-    """Reason string if the consolidated statements look like they include a finance arm."""
-    rs = receivables_share(balance)
-    if rs is not None and rs >= CAPTIVE_RECEIVABLES_SHARE:
-        return f"receivables are {rs:.0%} of total assets (>= {CAPTIVE_RECEIVABLES_SHARE:.0%})"
-    if not balance or not income:
+    """Reason string if the consolidated statements look like they include a finance arm
+    (see config: three independent signals, each calibrated against false positives)."""
+    if not balance:
         return None
+    assets = balance.get("totalAssets") or 0.0
+    recv = balance.get("netReceivables") or 0.0
+    payables = balance.get("accountPayables") or 0.0
     debt, cap = balance.get("totalDebt") or 0.0, profile.get("marketCap") or 0.0
-    interest = income.get("interestExpense") or 0.0
-    if debt > 0 and cap > 0 and interest > 0:
-        kd, weight = interest / debt, debt / (debt + cap)
-        if kd < rf - DCF_CAPTIVE_COD_GAP and weight > DCF_CAPTIVE_DEBT_WEIGHT:
+    if assets > 0 and recv > 0:
+        net_share = (recv - payables) / assets
+        if net_share >= CAPTIVE_NET_RECEIVABLES_SHARE and debt >= CAPTIVE_DEBT_TO_RECEIVABLES * recv:
             return (
-                f"derived cost of debt {kd:.2%} is far below the risk-free rate ({rf:.2%}) while debt is "
-                f"{weight:.0%} of capital — finance-arm interest booked outside interest expense"
+                f"receivables net of payables are {net_share:.0%} of assets and debt is {debt / recv:.2f}× "
+                "receivables — a debt-funded loan book, not trade credit"
             )
+    if not income or debt <= 0 or cap <= 0:
+        return None
+    weight = debt / (debt + cap)
+    if weight <= DCF_CAPTIVE_DEBT_WEIGHT:
+        return None
+    interest = income.get("interestExpense") or 0.0
+    if interest > 0 and interest / debt < rf - DCF_CAPTIVE_COD_GAP:
+        return (
+            f"derived cost of debt {interest / debt:.2%} is far below the risk-free rate ({rf:.2%}) while debt "
+            f"is {weight:.0%} of capital — finance-arm interest booked outside interest expense"
+        )
+    share = interest_income_share(income)
+    if share is not None and share >= CAPTIVE_INTEREST_INCOME_SHARE:
+        return (
+            f"interest income is {share:.1%} of revenue while debt is {weight:.0%} of capital — "
+            "an in-house lending business"
+        )
     return None
 
 

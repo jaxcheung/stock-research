@@ -19,7 +19,13 @@ from src.analysis.dcf import run_dcf
 from src.analysis.relative_valuation import PeerValuation, peer_valuation
 from src.analysis.stock_analysis import analyze_stock
 from src.analysis.valuation_summary import summarize_valuation
-from src.config import DEFAULT_MAX_PEERS, EQUITY_TO_ASSETS_BANDS, SCORE_RATING_BANDS, SCORE_WEIGHTS
+from src.config import (
+    DEFAULT_MAX_PEERS,
+    EQUITY_TO_ASSETS_BANDS,
+    SCORE_RATING_BANDS,
+    SCORE_WEIGHTS,
+    VALUATION_SCORE_CAP,
+)
 from src.data.fmp_client import FMPClient, FMPError
 from src.utils.logging import get_logger
 
@@ -72,16 +78,22 @@ def _score_valuation(
         text = f"{m.name} implies {abs(m.upside):.0%} {direction}"
         if m in summary.used:
             sub_scores.append(_band_score_higher_better(m.upside, _UPSIDE_BANDS))
-            notes.append(text + (" (low precision)" if summary.precision == "low" else ""))
+            notes.append(text)
         else:
             notes.append(f"{text} — not scored ({m.reason})")
     if peer_val is not None and peer_val.implied_price is None and peer_val.unavailable_reason:
         notes.append(f"No peer valuation: {peer_val.unavailable_reason}")
-    if summary.indeterminate:
-        notes.append(summary.verdict)
 
     valid_scores = [s for s in sub_scores if s is not None]
     score = round(sum(valid_scores) / len(valid_scores)) if valid_scores else None
+    if summary.scoring == "none":
+        score = None
+        notes.append(f"not scored: {summary.verdict}")
+    elif summary.scoring == "capped" and score is not None:
+        lo, hi = VALUATION_SCORE_CAP
+        if not lo <= score <= hi:
+            notes.append(f"score capped to {lo}–{hi} ({summary.precision} precision)")
+        score = min(max(score, lo), hi)
     return {"score": score, "rationale": "; ".join(notes) if notes else "Insufficient data", "detail": detail}
 
 
@@ -131,6 +143,15 @@ def _score_financial_health(stock: dict[str, Any]) -> dict[str, Any]:
         return {
             "score": None,
             "rationale": "not scored for insurers — solvency metrics (RBC ratio, combined ratio) unavailable",
+            "detail": leverage,
+        }
+    if stock.get("captiveFinance"):
+        # Consolidated current ratio, D/E and coverage all mix the finance arm's receivables,
+        # short-term funding and interest with the operating business (DE current ratio 2.31).
+        return {
+            "score": None,
+            "rationale": "not scored — captive-finance arm makes consolidated current ratio, D/E and "
+            "coverage not meaningful for the operating business",
             "detail": leverage,
         }
     if stock.get("businessModel", "standard") in FINANCIAL_KINDS:
@@ -301,6 +322,8 @@ def rank_opportunities(
                 "compositeScore": result["compositeScore"],
                 "rating": result["rating"],
                 "valuationScore": result["valuation"]["score"],
+                "valuationVerdict": result["valuation"]["detail"].get("verdict"),
+                "valuationPrecision": result["valuation"]["detail"].get("precision"),
                 "currentPrice": result["currentPrice"],
                 "dcfIntrinsicValue": result["dcfIntrinsicValue"],
                 "dcfUpsidePct": result["dcfUpsidePct"],
@@ -312,6 +335,8 @@ def rank_opportunities(
         "compositeScore",
         "rating",
         "valuationScore",
+        "valuationVerdict",
+        "valuationPrecision",
         "currentPrice",
         "dcfIntrinsicValue",
         "dcfUpsidePct",

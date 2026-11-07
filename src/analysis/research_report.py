@@ -204,19 +204,26 @@ def _identify_risks(report: dict[str, Any]) -> list[str]:
 
     dcf = report["dcf"]
     summary = _price_target(report)
-    dcf_used = any(m.name == "DCF" for m in summary.used)
-    if dcf and dcf_used and dcf["upsidePct"] is not None and dcf["upsidePct"] < -0.25:
+    dcf_credible = any(m.name == "DCF" and m.eligible for m in summary.methods)
+    if dcf and dcf_credible and dcf["upsidePct"] is not None and dcf["upsidePct"] < -0.25:
         premium = dcf["currentPrice"] / dcf["intrinsicValuePerShare"] - 1
         risks.append(
             f"Price is {premium:.0%} above DCF intrinsic value (intrinsic value {abs(dcf['upsidePct']):.0%} "
             "below the price) — meaningful valuation risk if growth/margin assumptions disappoint."
         )
-    if summary.precision == "low" and summary.target_range and summary.verdict.startswith("Rich"):
-        lo_v, hi_v = summary.target_range
+    rich_far = [
+        m
+        for m in summary.methods
+        if m.eligible and m.upside is not None and m.upside < -0.5 and m.name != "DCF"
+    ]
+    if summary.precision in ("low", "indicative") and rich_far and not summary.verdict.endswith("disagree"):
+        names = " and ".join(f"{m.name} (${m.value:.2f}, {m.upside:+.0%})" for m in rich_far)
+        confirmed = (
+            "confirmed by both methods" if summary.precision == "low" else "single method, unconfirmed"
+        )
         risks.append(
-            f"Valuation risk: every credible method values the stock more than 50% below the price "
-            f"({_fmt_range((lo_v, hi_v))} vs ${stock['price']:.2f}) — the price embeds expectations well beyond "
-            "what DCF or peer multiples support."
+            f"Valuation risk: {names} values the stock more than 50% below the price of ${stock['price']:.2f} "
+            f"({confirmed}) — the price embeds expectations well beyond what this method supports."
         )
 
     if report["macro"] and report["macro"]["yieldCurveInverted"]:
@@ -302,7 +309,7 @@ def render_research_report(
             f"  |  Target: ${target.target:.2f} ({target.method_text})"
             if target.target is not None
             else (
-                f"  |  Indicative: {_fmt_range(target.target_range)} (low precision)"
+                f"  |  Indicative: {_fmt_range(target.target_range)} ({target.precision} precision)"
                 if target.target_range is not None
                 else ""
             )
@@ -316,6 +323,8 @@ def render_research_report(
 
     lines.append("## Company Overview")
     lines.append(f"- Sector: {stock['sector']} / {stock['industry']}")
+    for note in stock.get("dataNotes", []):
+        lines.append(f"- ⚠️ Data quality: {note}")
     lines.append(
         f"- Business model: {stock.get('businessModel', 'standard').replace('_', ' ')}"
         + (" with captive finance" if stock.get("captiveFinance") else "")
@@ -433,9 +442,7 @@ def render_research_report(
     )
     for m in target.methods:
         reason = f"not used — {m.reason}" if m.reason else "not used"
-        status = (
-            "used" + (f" ({m.reason}, low precision)" if m.reason else "") if m in target.used else reason
-        )
+        status = "used" + (f" ({m.reason})" if m.reason else "") if m in target.used else reason
         up = f", {m.upside:+.0%}" if m.upside is not None else ""
         lines.append(f"- {m.name}: ${m.value:.2f}{up} ({status})")
     if target.target is not None and target.upside is not None:
@@ -449,6 +456,12 @@ def render_research_report(
             f"**Valuation: {valuation_verdict}** — {target.method_text}: {_fmt_range((lo_v, hi_v))} vs "
             f"${stock['price']:.2f}. The direction is consistent across methods; the magnitude is not "
             "precise enough for a point target."
+        )
+    elif target.precision == "indicative" and target.target_range is not None:
+        lines.append(
+            f"**Valuation: {valuation_verdict}** — {target.method_text}. One method on its own, this far "
+            "from the price, is a lead to investigate (check that method's inputs above), not a verdict; "
+            "it is not scored."
         )
     elif target.indeterminate:
         lines.append(
@@ -466,7 +479,7 @@ def render_research_report(
             f"- Methods diverge ({target.divergence_note}) — form your own view on which better fits "
             "this business before acting on either number alone."
         )
-    if target.precision != "none":
+    if target.precision in ("normal", "single", "low"):
         lines.append(
             f"\n**Bottom line:** {stock['companyName']} is a {score['rating'].lower()}-quality business "
             f"({score['compositeScore']}/100) trading at a valuation assessed as {valuation_verdict.lower()}. "

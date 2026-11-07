@@ -12,6 +12,7 @@
 from typing import Any
 
 from src.analysis.business_model import classify
+from src.analysis.data_quality import latest_complete_balance
 from src.config import (
     DCF_CAPTIVE_COD_GAP,
     DCF_DEBT_SPREAD,
@@ -110,7 +111,11 @@ def run_dcf(
     profile = client.get_profile(symbol)
     cash_flows = client.get_cash_flow(symbol, limit=5)
     income = client.get_income_statement(symbol, limit=1)
-    balance_sheet = client.get_balance_sheet(symbol, limit=1)
+    balance_rows = client.get_balance_sheet(symbol, limit=2)
+    latest_bs, bs_note = latest_complete_balance(balance_rows)
+    balance_sheet = [latest_bs] if latest_bs else []
+    if bs_note:
+        logger.warning("%s: %s", symbol, bs_note)
 
     if not cash_flows or not income or not balance_sheet:
         raise ValueError(f"Insufficient financial data to run DCF for {symbol}")
@@ -179,7 +184,6 @@ def run_dcf(
             )
 
     latest_income = income[0]
-    latest_bs = balance_sheet[0]
 
     pretax_income = latest_income.get("incomeBeforeTax")
     tax_expense = latest_income.get("incomeTaxExpense")
@@ -316,6 +320,7 @@ def run_dcf(
         # Reported, but never blended into a price target (research_report._price_target).
         "sanityBandBreach": sanity_breach,
         "businessModel": model.kind,
+        "dataNotes": [bs_note] if bs_note else [],
     }
 
 

@@ -80,9 +80,14 @@ Built incrementally, starting cheap:
   revenue (>= 10% lender; in Capital Markets/Asset Management 10–80% broker-dealer, >= 80%
   lender/BDC) → unmapped-interest test (interest < 0.5% but receivables >= 40% of assets →
   lender) → weak keywords → standard. Calibration and every override's reason live in
-  `config.py`; overrides are always disclosed in reports. Captive finance = receivables
-  >= 40% of assets, or cost of debt far below risk-free with debt > 50% of capital (a low
-  cost of debt alone is NOT a signal — GOOGL/XOM derive ~1.3% from legacy coupons).
+  `config.py`; overrides are always disclosed in reports. Captive finance = debt-funded
+  receivables ((receivables − payables) >= 40% of assets AND debt >= 0.6× receivables), or
+  cost of debt far below risk-free with debt > 50% of capital, or interest income >= 5% of
+  revenue with debt > 50% of capital. Receivables alone flagged freight brokers, staffing
+  firms and distributors (trade credit, funded by payables); a low cost of debt alone flags
+  GOOGL/XOM (legacy coupons). Overrides may also set `peer_industries`, and
+  `KIND_PEER_INDUSTRIES` widens the industry peer screen for models FMP spreads across
+  industries (broker-dealers, BDCs).
   Consequences:
   - `dcf.py` raises `ValueError` (→ "DCF unavailable: <reason>") for every non-`standard`
     model and for captive finance, cost of debt > `DCF_MAX_DERIVED_COST_OF_DEBT`,
@@ -93,22 +98,30 @@ Built incrementally, starting cheap:
   - Peer valuation (`relative_valuation.peer_valuation`) uses P/E (standard, asset
     managers), ROE-adjusted P/B (bank / lender / broker-dealer / insurer: warranted P/B =
     peer P/B × (ROE_s − g)/(ROE_p − g); loss-making peers excluded from the P/B and ROE
-    aggregates; peer ROE must exceed g by `PEER_ROE_MIN_SPREAD` and the factor must fall in
-    `PEER_ROE_ADJ_BOUNDS`, else "unreliable") or P/FFO (REITs). Peers share the subject's
+    aggregates; peer ROE must exceed g by `PEER_ROE_MIN_SPREAD` and the subject's ROE must
+    lie inside the peer ROE range — interpolation, not extrapolation — else "unreliable") or P/FFO (REITs). Peers share the subject's
     business model and are operating equities; one scope at a time; Σ÷Σ + median; >=
-    `PEER_TARGET_MIN_PEERS` or no implied price.
+    `PEER_TARGET_MIN_PEERS` usable peers (usability — e.g. no loss-makers for P/B — is
+    checked DURING selection, so the search continues until enough are found) or no
+    implied price.
   - **`valuation_summary.summarize_valuation` is the single rule** for which methods count
     and what the valuation verdict is; the report's price target AND the scorecard's
-    valuation signal both use it (they disagreed before). Credible methods within
-    ±`TARGET_MAX_SINGLE_METHOD_GAP` are blended into a target; if all credible methods are
-    beyond it and agree in direction, the verdict is "<Rich|Attractive> — low precision"
-    with an indicative range and a risk line; credible methods that disagree →
-    "Indeterminate — methods disagree"; only non-credible methods → "Indeterminate — no
-    credible method".
+    valuation signal both use it. Credible methods pointing to different verdicts →
+    "Indeterminate — methods disagree" (whichever is in band). Two agreeing methods with one
+    within ±`TARGET_MAX_SINGLE_METHOD_GAP` → point target, full score. Two agreeing, both
+    beyond → "low precision" range. One method within the band → "(single method)". In both
+    of those, the score is capped to `VALUATION_SCORE_CAP`. One method beyond the band →
+    "Indicative only", unscored. Strong valuation scores need corroboration.
   - Scorecard: banks/lenders/broker-dealers are scored on equity ÷ assets; insurers'
     financial health is not scored (separate-account assets make equity/assets meaningless;
     RBC/combined ratio unavailable); negative equity makes D/E and ROE "n/m"; captive
-    finance makes D/E and interest coverage "n/m". Each adds an explicit risk line.
+    finance leaves financial health unscored (consolidated current ratio, D/E and coverage all
+    mix in the finance arm). Each adds an explicit risk line.
+- **Data quality (`src/analysis/data_quality.py`).** Stub statement rows (latest period with
+  equity and liabilities zero, or assets < `STUB_STATEMENT_ASSET_RATIO` of the prior period)
+  are never read as real: analyses fall back to the prior period and surface a "Data
+  quality" note (RJF FY2026 read as "$0 equity" before). Add new deterministic checks
+  here, never as silent corrections.
 - **Secrets never reach logs.** `get_logger` uses a redacting formatter
   (`apikey=`/`api_key=`/`token=` values → `***`), and client errors re-raise
   `from None` so the raw requests exception (URL incl. key) isn't chained.
@@ -251,6 +264,8 @@ scripts like `~/bedrock_setup.sh` are outside the project and the repo).
 - `src/analysis/business_model.py` — `classify(profile, income, balance, risk_free_rate)` →
   `BusinessModel(kind, reason, captive_finance, subtype, override)`; drives DCF applicability,
   peer method, peer matching and scorecard health metrics.
+- `src/analysis/data_quality.py` — deterministic statement checks (`latest_complete_balance`:
+  stub-row fallback with a disclosed note); used by stock_analysis, dcf and relative_valuation.
 - `src/analysis/valuation_summary.py` — `summarize_valuation(price, dcf, peer)` →
   `ValuationSummary`: method eligibility, blended / low-precision / indeterminate verdict,
   divergence; shared by `research_report` and `investment_score`.

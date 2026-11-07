@@ -84,6 +84,14 @@ if result and result["symbol"] == symbol:
         delta=f"{upside * 100:.1f}%" if upside is not None else None,
     )
 
+    a = result["assumptions"]
+    if a.get("costOfDebtFloored"):
+        st.caption(
+            f"Cost of debt {a['costOfDebt']:.2%} = risk-free + spread: the derived "
+            f"{a['derivedCostOfDebt']:.2%} (interest ÷ debt) reflects legacy coupons, not the marginal cost of borrowing."
+        )
+    for note in result.get("dataNotes", []):
+        st.warning(f"Data quality: {note}")
     tv_share = result.get("terminalValueShare")
     if tv_share is not None:
         msg = f"Terminal value is {tv_share:.0%} of enterprise value."
