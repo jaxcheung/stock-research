@@ -1,0 +1,24 @@
+# Secrets — never commit (see CLAUDE.md Rules)
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Personal financial data & runtime output
+/data/
+/log/
+
+# Python / tooling caches
+__pycache__/
+*.pyc
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Editor / OS
+*.swp
+.DS_Store
+.vscode/
+.idea/

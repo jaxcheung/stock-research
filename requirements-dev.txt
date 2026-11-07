@@ -1,0 +1,6 @@
+# Dev tooling on top of runtime deps — pinned so lint/type results are stable.
+-r requirements.txt
+ruff==0.17.3
+mypy==2.4.1
+pandas-stubs==2.3.3.260113
+types-requests==2.33.0.20261030
