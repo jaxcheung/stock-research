@@ -128,12 +128,28 @@ Built incrementally, starting cheap:
   (`isEtf`/`isFund=false`) because FMP's response flags are unreliable — "Asset Management"
   returned 100 funds and no BDCs. Peer screens also run a size-banded pass per industry,
   since the screener returns at most 100 rows, largest first.
+- **Thin peer sets are escalated, never silently replaced.** Industry Comparison tries:
+  own FMP industry → the similar-size band's lower bound relaxed (`PEER_SIZE_RELAX_STEPS`,
+  for mega-caps) → own industry + `RELATED_INDUSTRIES` (config map with a reason per entry)
+  → whole sector. Each scope is labelled, and a **peer funnel** (listed → US/operating →
+  size filter, per FMP pool and attempt) explains the result. AAPL: "Consumer Electronics"
+  has 7 other listings, none of similar size → hardware/equipment peers (CSCO, ANET, DELL,
+  APH …), not the whole Technology sector. `peer_valuation` uses the same related-industry
+  map ("Industry + related peers").
 - **Data quality (`src/analysis/data_quality.py`).** Stub statement rows (latest period with
   equity and liabilities zero, or assets < `STUB_STATEMENT_ASSET_RATIO` of the prior period)
   are never read as real: analyses fall back to the prior period — balance sheet AND the
   ratios/key metrics of that period, and FY book for peer P/B when TTM P/B is a stub — and
-  surface a "Data quality" note (RJF FY2026 read as "$0 equity" before). Add new deterministic checks
-  here, never as silent corrections.
+  surface a "Data quality" note (RJF FY2026 read as "$0 equity" before). `check_statements(income,
+  balance, cashflow)` → `DataQualityReport` of warn/info issues: balance identity, FCF =
+  CFO − capex, income vs cash-flow net income tie-out (>10% gap = warning), stub rows,
+  missing or duplicate periods, revenue jumps, share-count changes, equity sign flips,
+  unmapped fields (material last year, 0 now) and mixed reporting currencies. Thresholds are
+  `DQ_*` in config. Surfaced on the Stock Analysis page, in the research report (section plus
+  a Key Risks line) and as DCF data notes; `store_audit` gives raw counts for the Parquet
+  store. Add new deterministic checks here, never as silent corrections.
+- **SEC EDGAR** reconciliation is the next data-quality round. It is disabled until the user
+  sets `SEC_USER_AGENT` (SEC requires a contact on every request; never default it).
 - **Secrets never reach logs.** `get_logger` uses a redacting formatter
   (`apikey=`/`api_key=`/`token=` values → `***`), and client errors re-raise
   `from None` so the raw requests exception (URL incl. key) isn't chained.
@@ -234,6 +250,9 @@ Built incrementally, starting cheap:
       industry-specific indicator profiles, selectable indicators, return vs risk vs valuation reported
       separately, peer filters (scope, cap-size buckets, US-only, include/exclude), industry aggregates,
       $-formatted tables. Annual only: FMP quarterly ratios are Premium (402, verified).
+- [x] Data quality, round 1 (2026-11-07): peer funnel and related-industry escalation (fixes
+      AAPL's 0 industry peers); statement consistency checks surfaced in the Stock Analysis
+      page, the research report and the DCF page; store audit. Next: SEC EDGAR reconciliation.
 - [ ] News integration into reports (news endpoint exists in `fmp_client.py`,
       not yet wired into analysis output or the dashboard).
 - [x] Quant Lab (2026-11-05): source-agnostic series loader (FRED incl. keyless

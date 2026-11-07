@@ -40,6 +40,7 @@ from src.config import (
     PEER_ROE_RANGE_TOLERANCE,
     PEER_TARGET_MIN_PEERS,
     PLAIN_PB_SUBTYPES,
+    RELATED_INDUSTRIES,
     RELVAL_HISTORY_YEARS,
     RELVAL_MARKET_PROXY_MIN_CAP,
     RELVAL_MARKET_PROXY_SIZE,
@@ -164,6 +165,7 @@ def _company_row(symbol: str, client: FMPClient) -> dict[str, Any] | None:
                 [profile.get("industry") or ""]
                 + list(BUSINESS_MODEL_OVERRIDES.get(symbol.upper(), {}).get("peer_industries", []))
                 + ([] if model.subtype in PLAIN_PB_SUBTYPES else KIND_PEER_INDUSTRIES.get(model.kind, []))
+                + RELATED_INDUSTRIES.get(profile.get("industry") or "", {}).get("related", [])
             )
         ),
         "captiveFinance": model.captive_finance,
@@ -865,6 +867,8 @@ def peer_valuation(
         pv.excluded_fx += fx
         if len(df) >= PEER_TARGET_MIN_PEERS:
             chosen, pv.scope = df, scope
+            if same_ind and "industry" in df and (df["industry"] != me.get("industry")).any():
+                pv.scope = "Industry + related peers"
             if skipped:
                 pv.notes.append("Skipped during peer selection: " + ", ".join(skipped))
             break

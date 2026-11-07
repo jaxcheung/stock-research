@@ -168,6 +168,9 @@ KNOWLEDGE_DB_PATH = ROOT_DIR / "data" / "knowledge.db"
 
 # FRED (Federal Reserve Economic Data) — macro/economic indicators
 FRED_API_KEY = os.environ.get("FRED_API_KEY")
+# SEC EDGAR (data-quality reconciliation, next round). SEC requires a User-Agent with a contact
+# name and email on every request; EDGAR checks stay disabled until the user sets this.
+SEC_USER_AGENT = os.environ.get("SEC_USER_AGENT")
 FRED_BASE_URL = "https://api.stlouisfed.org/fred"
 FRED_MAX_RETRIES = 3
 FRED_RETRY_BACKOFF_SECONDS = 0.5
@@ -220,6 +223,13 @@ VALUATION_SCORE_CAP = (15, 85)
 # the prior period's (or with zero equity AND zero liabilities) is a stub row (RJF FY2026:
 # 3 non-zero fields) — analyses fall back to the prior period and say so.
 STUB_STATEMENT_ASSET_RATIO = 0.10
+# Statement checks (data_quality.check_statements) — surfaced as issues, never auto-corrected.
+DQ_IDENTITY_TOLERANCE = 0.01  # accounting identities may differ by at most 1% (of assets / CFO / NI)
+DQ_REVENUE_JUMP = 3.0  # YoY revenue x3 or /3: flag (M&A, restatement, or a units error)
+DQ_SHARE_CHANGE = 0.20  # diluted share count moving >20% YoY: split, merger or large buyback?
+DQ_MAX_GAP_DAYS = 400  # consecutive annual periods further apart than this = a missing year
+DQ_TIEOUT_WARN = 0.10  # income vs cash-flow net income further apart than this = warning, not note
+DQ_UNMAPPED_MATERIALITY = 0.01  # field material last year (>1% of revenue/assets) but 0 now
 
 # Composite score (0-100) -> rating thresholds
 SCORE_RATING_BANDS = [
@@ -448,7 +458,27 @@ INDUSTRY_COMP_MAX_PEERS = 10
 INDUSTRY_COMP_MAX_PEERS_LIMIT = 25  # UI ceiling (each company costs ~7 FMP calls on first load)
 INDUSTRY_COMP_SCREEN_LIMIT = 200  # screener rows fetched before cap/country filtering
 INDUSTRY_COMP_MIN_CAP = 50_000_000  # screener floor: excludes shells / near-dormant listings
-INDUSTRY_COMP_SIMILAR_SIZE_BAND = (0.2, 5.0)  # "similar size" = 0.2x-5x of the subject's market cap
+INDUSTRY_COMP_SIMILAR_SIZE_BAND = (0.2, 5.0)
+# When fewer than INDUSTRY_COMP_MIN_FOR_AGGREGATE peers fall in the similar-size band, the
+# band's LOWER bound is relaxed step by step (multiples of the subject's cap) before the peer
+# scope widens. Mega-caps need this: 0.2x of AAPL's $5tn is $1tn, which excludes everyone.
+PEER_SIZE_RELAX_STEPS = (0.2, 0.05, 0.01)
+# Thin FMP industries -> adjacent FMP industries tried as "industry + related" BEFORE the
+# whole sector (scopes are labelled and never blended). Every entry needs a reason.
+RELATED_INDUSTRIES: dict[str, dict[str, Any]] = {
+    "Consumer Electronics": {
+        "related": ["Computer Hardware", "Communication Equipment", "Hardware, Equipment & Parts"],
+        "reason": "8 listings, only SONY large (JPY); device/hardware makers sit in adjacent industries",
+    },
+    "Computer Hardware": {
+        "related": ["Consumer Electronics", "Communication Equipment"],
+        "reason": "device and networking hardware are split across these FMP industries",
+    },
+    "Communication Equipment": {
+        "related": ["Computer Hardware", "Hardware, Equipment & Parts"],
+        "reason": "only CSCO and MSI are large; networking hardware sits in Computer Hardware",
+    },
+}  # "similar size" = 0.2x-5x of the subject's market cap
 INDUSTRY_COMP_MIN_FOR_AGGREGATE = 3  # fewer companies than this -> aggregate not reported
 # Market-cap buckets (USD, lower bound inclusive / upper exclusive; None = unbounded)
 CAP_SIZE_BUCKETS: dict[str, tuple[float, float | None]] = {

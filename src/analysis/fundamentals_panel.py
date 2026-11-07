@@ -25,7 +25,13 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from src.config import FISCAL_YEAR_END_GRACE_DAYS, LEADERBOARD_MIN_START_REVENUE, PANEL_MIN_COMPANIES
+from src.config import (
+    DQ_MAX_GAP_DAYS,
+    DQ_REVENUE_JUMP,
+    FISCAL_YEAR_END_GRACE_DAYS,
+    LEADERBOARD_MIN_START_REVENUE,
+    PANEL_MIN_COMPANIES,
+)
 from src.data.store import StoreDB
 from src.utils.logging import get_logger
 
@@ -209,6 +215,35 @@ def growth_leaderboard(
     ).reset_index(drop=True)
 
 
+_STORE_AUDIT_SQL = """
+WITH r AS (
+    SELECT symbol, CAST(date AS DATE) AS d, fiscalYear, revenue, netIncome,
+           lag(CAST(date AS DATE)) OVER (PARTITION BY symbol ORDER BY CAST(date AS DATE)) AS prev_d,
+           lag(revenue) OVER (PARTITION BY symbol ORDER BY CAST(date AS DATE)) AS prev_rev
+    FROM income_annual WHERE period = 'FY'
+)
+SELECT
+    count(*) AS rows,
+    count(DISTINCT symbol) AS companies,
+    (SELECT count(*) FROM (SELECT symbol, fiscalYear FROM income_annual WHERE period = 'FY'
+                           GROUP BY 1, 2 HAVING count(*) > 1)) AS duplicate_fiscal_years,
+    count(*) FILTER (WHERE prev_d IS NOT NULL AND d - prev_d > {gap}) AS missing_year_gaps,
+    count(*) FILTER (WHERE coalesce(revenue, 0) = 0 AND coalesce(netIncome, 0) = 0) AS stub_rows,
+    count(*) FILTER (WHERE revenue > 0 AND prev_rev > 0 AND (revenue / prev_rev > {jump} OR revenue / prev_rev < 1.0 / {jump})) AS revenue_jumps
+FROM r
+"""
+
+
+def store_audit(db: StoreDB | None = None) -> dict[str, int]:
+    """Data-quality counts over the local income-statement store (no API calls). Shown as a
+    caveat; the panel itself already calendarises and dedupes — these are the raw numbers."""
+    db = db or StoreDB()
+    if "income_annual" not in db.tables:
+        return {}
+    row = db.query(_STORE_AUDIT_SQL.format(gap=int(DQ_MAX_GAP_DAYS), jump=float(DQ_REVENUE_JUMP))).iloc[0]
+    return {str(k): int(v) for k, v in row.items()}
+
+
 def analyze_panel(db: StoreDB | None = None) -> PanelReport:
     panel = load_panel(db)
     yrs = complete_years(panel)
@@ -285,6 +320,19 @@ def analyze_panel(db: StoreDB | None = None) -> PanelReport:
     if len(currencies) > 1:
         rep.caveats.append(
             f"Reporting currencies present: {', '.join(sorted(currencies))} — ratio-only comparisons."
+        )
+    try:
+        audit = store_audit(db)
+    except Exception as exc:  # audit is informational; never fail the panel on it
+        logger.warning("Store audit failed: %s", exc)
+        audit = {}
+    rep.coverage["dataQuality"] = audit
+    if audit:
+        rep.caveats.append(
+            f"Store data quality (raw rows, before the panel's dedupe): {audit['duplicate_fiscal_years']} duplicate "
+            f"company fiscal years, {audit['missing_year_gaps']} missing-year gaps, {audit['stub_rows']} stub rows "
+            f"(zero revenue and net income), {audit['revenue_jumps']} year-on-year revenue jumps beyond "
+            f"{DQ_REVENUE_JUMP:g}× — across {audit['rows']:,} rows / {audit['companies']} companies."
         )
     if yrs and int(panel["year"].max()) > yrs[-1]:
         rep.caveats.append(

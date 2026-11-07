@@ -26,6 +26,8 @@ from src.config import (
     INDUSTRY_COMP_SCREEN_LIMIT,
     INDUSTRY_COMP_SIMILAR_SIZE_BAND,
     MARKET_BENCHMARK_SYMBOL,
+    PEER_SIZE_RELAX_STEPS,
+    RELATED_INDUSTRIES,
     RELVAL_MAX_MEANINGFUL_PE,
 )
 from src.data.fmp_client import FMPClient, FMPError, normalize_symbol
@@ -106,10 +108,13 @@ def cap_bucket(cap: float | None) -> str:
     return "—"
 
 
-def _cap_bounds(f: PeerFilters, subject_cap: float | None) -> tuple[float, float | None]:
+def _cap_bounds(
+    f: PeerFilters, subject_cap: float | None, lo_mult: float | None = None
+) -> tuple[float, float | None]:
     if f.size_mode == "similar" and subject_cap:
         lo, hi = INDUSTRY_COMP_SIMILAR_SIZE_BAND
-        return subject_cap * lo, subject_cap * hi
+        lo = lo if lo_mult is None else lo_mult
+        return max(subject_cap * lo, INDUSTRY_COMP_MIN_CAP), subject_cap * hi
     if f.size_mode == "buckets":
         ranges = [CAP_SIZE_BUCKETS[b] for b in f.cap_buckets]
         uppers = [r[1] for r in ranges if r[1] is not None]
@@ -118,53 +123,102 @@ def _cap_bounds(f: PeerFilters, subject_cap: float | None) -> tuple[float, float
     return INDUSTRY_COMP_MIN_CAP, None
 
 
-def _cap_ok(cap: float | None, f: PeerFilters, subject_cap: float | None) -> bool:
+def _cap_ok(
+    cap: float | None, f: PeerFilters, subject_cap: float | None, lo_mult: float | None = None
+) -> bool:
     if not cap:
         return False
     if f.size_mode == "buckets":
         return any(
             cap >= lo and (hi is None or cap < hi) for lo, hi in (CAP_SIZE_BUCKETS[b] for b in f.cap_buckets)
         )
-    lo, hi = _cap_bounds(f, subject_cap)
+    lo, hi = _cap_bounds(f, subject_cap, lo_mult)
     return cap >= lo and (hi is None or cap <= hi)
 
 
 def find_peer_candidates(
-    subject: CompanyData, f: PeerFilters, client: FMPClient
+    subject: CompanyData,
+    f: PeerFilters,
+    client: FMPClient,
+    industries: list[str] | None = None,
+    lo_mult: float | None = None,
+    funnel: list[dict[str, Any]] | None = None,
 ) -> list[tuple[str, str, float | None]]:
     """Ordered (symbol, origin, marketCap) candidates for one scope, nearest in
     size first, share classes de-duplicated, US major exchanges only (foreign
-    listings 402 on Starter)."""
+    listings 402 on Starter).
+
+    Industry scope screens each of `industries` (default: the subject's own) WITHOUT a
+    size band and applies filters client-side, so every stage can be counted into
+    `funnel` — the record of why a peer set is thin (AAPL: 8 listed → 0 similar size).
+    `lo_mult` overrides the similar-size band's lower bound (mega-cap relaxation)."""
     cands: list[tuple[str, str, float | None]] = []
     cap = subject.market_cap
     if f.scope in ("industry", "sector"):
-        lo, hi = _cap_bounds(f, cap)
-        filt: dict[str, Any] = {"marketCapMoreThan": int(lo)}
-        if hi is not None:
-            filt["marketCapLowerThan"] = int(hi)
-        if f.us_only:
-            filt["country"] = "US"
-        filt[f.scope] = subject.industry if f.scope == "industry" else subject.sector
-        rows = client.screen_companies(limit=INDUSTRY_COMP_SCREEN_LIMIT, **filt)
-        rows = [
-            r
-            for r in rows
-            if r.get("exchangeShortName") in _MAJOR
-            and not r.get("isEtf")
-            and not r.get("isFund")
-            and r.get("symbol")
-            and "." not in r["symbol"]
-            and is_operating_equity(r)
-            and _cap_ok(r.get("marketCap"), f, cap)
-        ]
-        by_name: dict[str, dict[str, Any]] = {}
-        for r in rows:  # share classes (GOOG/GOOGL): keep the most liquid
+        lo, hi = _cap_bounds(f, cap, lo_mult)
+        if f.scope == "industry":
+            pools = [
+                (ind, {"industry": ind, "marketCapMoreThan": int(INDUSTRY_COMP_MIN_CAP)})
+                for ind in (industries or [subject.industry])
+            ]
+        else:
+            filt: dict[str, Any] = {"sector": subject.sector, "marketCapMoreThan": int(lo)}
+            if hi is not None:
+                filt["marketCapLowerThan"] = int(hi)
+            pools = [(subject.sector, filt)]
+        rows_all: list[tuple[str, dict[str, Any]]] = []
+        for name, filt in pools:
+            if f.us_only:
+                filt["country"] = "US"
+            listed = [
+                r
+                for r in client.screen_companies(limit=INDUSTRY_COMP_SCREEN_LIMIT, **filt)
+                if r.get("symbol")
+            ]
+            listed = [r for r in listed if r["symbol"] != subject.symbol]
+            eligible = [
+                r
+                for r in listed
+                if r.get("exchangeShortName") in _MAJOR
+                and not r.get("isEtf")
+                and not r.get("isFund")
+                and "." not in r["symbol"]
+                and is_operating_equity(r)
+            ]
+            sized = [r for r in eligible if _cap_ok(r.get("marketCap"), f, cap, lo_mult)]
+            if funnel is not None:
+                funnel.append(
+                    {
+                        "pool": name,
+                        "listed (ex-subject)": len(listed),
+                        "US major exchange, operating equity": len(eligible),
+                        "size filter": len(sized),
+                        "largest excluded by size": ", ".join(
+                            r["symbol"]
+                            for r in sorted(
+                                (r for r in eligible if r not in sized),
+                                key=lambda r: -(r.get("marketCap") or 0),
+                            )[:3]
+                        ),
+                    }
+                )
+            rows_all += [(name, r) for r in sized]
+        by_name: dict[str, tuple[str, dict[str, Any]]] = {}
+        for name, r in rows_all:  # share classes (GOOG/GOOGL): keep the most liquid
             key = r.get("companyName") or r["symbol"]
-            if key not in by_name or (r.get("volume") or 0) > (by_name[key].get("volume") or 0):
-                by_name[key] = r
+            if key not in by_name or (r.get("volume") or 0) > (by_name[key][1].get("volume") or 0):
+                by_name[key] = (name, r)
         ref = cap or 1.0
-        ordered = sorted(by_name.values(), key=lambda r: abs(np.log((r.get("marketCap") or 1) / ref)))
-        cands = [(r["symbol"], SCOPES[f.scope], r.get("marketCap")) for r in ordered]
+        ordered = sorted(by_name.values(), key=lambda nr: abs(np.log((nr[1].get("marketCap") or 1) / ref)))
+        own = subject.industry if f.scope == "industry" else None
+        cands = [
+            (
+                r["symbol"],
+                SCOPES[f.scope] if (f.scope == "sector" or name == own) else f"Related industry: {name}",
+                r.get("marketCap"),
+            )
+            for name, r in ordered
+        ]
     elif f.scope == "fmp":
         for p in client.get_stock_peers(subject.symbol):
             sym = p.get("symbol")
@@ -201,6 +255,8 @@ class IndustryComparisonReport:
     methodology: list[str] = field(default_factory=list)
     caveats: list[str] = field(default_factory=list)
     notice: str | None = None  # scope fallback, shown prominently
+    scope_label: str = ""  # the peer scope actually used ("Industry + related: ..." etc.)
+    peer_funnel: list[dict[str, Any]] = field(default_factory=list)  # why the peer set is what it is
 
     @property
     def peers(self) -> list[str]:
@@ -240,26 +296,73 @@ def run_industry_comparison(
     subject = load_company(symbol, client, years=years, bench_prices=bench)
     profile_key, profile = get_profile(subject.sector, subject.industry)
 
-    try:
-        candidates = find_peer_candidates(subject, f, client)
-    except FMPError as exc:
-        logger.warning("Peer screen failed for %s: %s", symbol, exc)
-        candidates = [(s, "Included manually", None) for s in f.include]
+    funnel: list[dict[str, Any]] = []
+    candidates: list[tuple[str, str, float | None]] = []
     notice = None
-    screened = [x for x in candidates if x[1] != "Included manually"]
-    if f.scope == "industry" and len(screened) < INDUSTRY_COMP_MIN_FOR_AGGREGATE:
-        # Thin industry (e.g. AAPL in Consumer Electronics): REPLACE the scope
-        # with the sector — the two sets are never blended — and say so.
-        notice = (
-            f"Only {len(screened)} peer(s) in industry '{subject.industry}' matched the filters, so the peer "
-            f"set uses the whole sector '{subject.sector}' instead (same size/country filters)."
-        )
-        logger.info("%s: %s", symbol, notice)
-        f = replace(f, scope="sector")
+    scope_label = SCOPES[f.scope]
+    if f.scope == "industry":
+        # Escalation, each step labelled and never blended: own industry → relaxed size band
+        # (mega-caps) → industry + related industries (config) → whole sector.
+        related = RELATED_INDUSTRIES.get(subject.industry or "", {}).get("related", [])
+        steps = PEER_SIZE_RELAX_STEPS if f.size_mode == "similar" else (None,)
+        attempts = [([subject.industry], "Same FMP industry")]
+        if related:
+            attempts.append(([subject.industry, *related], "Industry + related: " + ", ".join(related)))
+        found = False
+        for industries, label in attempts:
+            for lo_mult in steps:
+                step_funnel: list[dict[str, Any]] = []
+                try:
+                    candidates = find_peer_candidates(subject, f, client, industries, lo_mult, step_funnel)
+                except FMPError as exc:
+                    logger.warning("Peer screen failed for %s: %s", symbol, exc)
+                    candidates = [(s_, "Included manually", None) for s_ in f.include]
+                for row in step_funnel:
+                    row["attempt"] = label + (
+                        f" (size ≥ {lo_mult:g}× subject)" if lo_mult is not None else ""
+                    )
+                funnel += step_funnel
+                if (
+                    len([x for x in candidates if x[1] != "Included manually"])
+                    >= INDUSTRY_COMP_MIN_FOR_AGGREGATE
+                ):
+                    found, scope_label = True, label
+                    break
+            if found:
+                break
+        n_listed = funnel[0]["listed (ex-subject)"] if funnel else 0
+        used = funnel[-1]["attempt"] if funnel else scope_label
+        if found and len(funnel) > 1:
+            notice = (
+                f"FMP industry '{subject.industry}' is thin ({n_listed} other listings; see the peer funnel), "
+                f"so the peer set is: {used}."
+            )
+        elif not found:
+            notice = (
+                f"Only {len([x for x in candidates if x[1] != 'Included manually'])} peer(s) in industry "
+                f"'{subject.industry}'"
+                + (" and its related industries" if related else "")
+                + f" after relaxing the size band (see the peer funnel), so the peer set uses the whole sector "
+                f"'{subject.sector}' instead (same size/country filters)."
+            )
+            f = replace(f, scope="sector")
+            scope_label = SCOPES["sector"]
+            try:
+                sector_funnel: list[dict[str, Any]] = []
+                candidates = find_peer_candidates(subject, f, client, funnel=sector_funnel)
+                for row in sector_funnel:
+                    row["attempt"] = "Whole sector"
+                funnel += sector_funnel
+            except FMPError as exc:
+                logger.warning("Sector screen failed for %s: %s", symbol, exc)
+        if notice:
+            logger.info("%s: %s", symbol, notice)
+    else:
         try:
-            candidates = find_peer_candidates(subject, f, client)
+            candidates = find_peer_candidates(subject, f, client, funnel=funnel)
         except FMPError as exc:
-            logger.warning("Sector screen failed for %s: %s", symbol, exc)
+            logger.warning("Peer screen failed for %s: %s", symbol, exc)
+            candidates = [(s_, "Included manually", None) for s_ in f.include]
 
     companies: dict[str, CompanyData] = {symbol: subject}
     origins = {symbol: "Subject"}
@@ -302,6 +405,8 @@ def run_industry_comparison(
         skipped=skipped,
     )
     rep.notice = notice
+    rep.scope_label = scope_label
+    rep.peer_funnel = funnel
     rep.methodology = _methodology(rep)
     rep.caveats = _caveats(rep)
     if notice:

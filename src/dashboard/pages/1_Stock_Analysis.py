@@ -76,6 +76,17 @@ if c.currency_mismatch:
         "Valuation multiples are unavailable (no FX conversion). Margins, returns and leverage are valid; "
         f"statement figures are shown in {c.reporting_currency}."
     )
+dq = c.data_quality
+if dq is not None:
+    label = f"Data quality — {dq.summary()}"
+    with st.expander(("⚠️ " if dq.warnings else "") + label, expanded=bool(dq.warnings)):
+        if dq.issues:
+            for line in dq.lines():
+                st.markdown(f"- {html.escape(line)}")
+        st.caption(
+            "Deterministic checks on the source statements (accounting identities, stub rows, missing or "
+            "duplicate periods, unmapped fields, currency consistency). Issues are reported, never corrected."
+        )
 ui.kpi_row(b.stock_kpis(c))
 
 # ------------------------------------------------------------------ indicator picker

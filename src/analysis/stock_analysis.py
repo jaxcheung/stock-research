@@ -3,7 +3,7 @@
 from typing import Any
 
 from src.analysis.business_model import classify
-from src.analysis.data_quality import latest_complete_balance
+from src.analysis.data_quality import check_statements, latest_complete_balance
 from src.analysis.dcf import live_risk_free_rate
 from src.data.fmp_client import FMPClient, FMPError
 from src.utils.logging import get_logger
@@ -29,7 +29,12 @@ def analyze_stock(symbol: str, client: FMPClient | None = None, years: int = 5) 
     ratios = client.get_ratios(symbol, limit=years)
     key_metrics = client.get_key_metrics(symbol, limit=years)
     try:
-        balance = client.get_balance_sheet(symbol, limit=2)
+        cash_rows = client.get_cash_flow(symbol, limit=years)
+    except FMPError as exc:
+        logger.warning("%s: cash-flow statement unavailable (%s)", symbol, exc)
+        cash_rows = []
+    try:
+        balance = client.get_balance_sheet(symbol, limit=max(2, years))
     except FMPError as exc:
         logger.warning("%s: balance sheet unavailable (%s) — equity-based checks skipped", symbol, exc)
         balance = []
@@ -92,6 +97,7 @@ def analyze_stock(symbol: str, client: FMPClient | None = None, years: int = 5) 
         "reportingCurrency": reporting_currency,
         "currencyMismatch": currency_mismatch,
         "dataNotes": [bs_note] if bs_note else [],
+        "dataQuality": check_statements(income, balance, cash_rows, expected_years=years),
         "businessModel": model.kind,
         "businessModelReason": model.reason,
         "captiveFinance": model.captive_finance,

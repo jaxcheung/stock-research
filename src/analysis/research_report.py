@@ -144,7 +144,7 @@ def _peer_section(report: dict[str, Any]) -> list[str]:
         f"*Method: {pv.method_label} — chosen for a {pv.kind.replace('_', ' ')} business. "
         f"Peer set: {pv.scope or 'none'} (same business model, US listings, operating equities only).*"
     ]
-    if pv.industries_screened and pv.scope == "Industry peers":
+    if pv.industries_screened and pv.scope in ("Industry peers", "Industry + related peers"):
         out.append("- FMP industries screened: " + "; ".join(pv.industries_screened))
     f = lambda v: f"{v:.2f}×" if v is not None else "n/a"  # noqa: E731
     if pv.n:
@@ -253,6 +253,14 @@ def _identify_risks(report: dict[str, Any]) -> list[str]:
         risks.append(
             f"Valuation risk: {names} values the stock more than 50% below the price of ${stock['price']:.2f} "
             f"({confirmed}) — the price embeds expectations well beyond what this method supports."
+        )
+
+    dq = stock.get("dataQuality")
+    if dq is not None and dq.warnings:
+        risks.append(
+            f"Data quality: {len(dq.warnings)} warning(s) in the source statements "
+            f"({', '.join(dict.fromkeys(i.check for i in dq.warnings))}) — see the Data Quality section "
+            "before relying on the affected figures."
         )
 
     if report["macro"] and report["macro"]["yieldCurveInverted"]:
@@ -366,6 +374,15 @@ def render_research_report(
             f"- ⚠️ Quoted in {stock['quoteCurrency']}, reports financials in {stock['reportingCurrency']}"
         )
     lines.append("")
+
+    dq = stock.get("dataQuality")
+    if dq is not None:
+        lines.append("## Data Quality")
+        lines.append(
+            f"*{dq.summary()} Deterministic checks on the source statements; reported, never corrected.*"
+        )
+        lines.extend(f"- {line}" for line in dq.lines())
+        lines.append("")
 
     lines.append("## Macro Backdrop")
     if macro:

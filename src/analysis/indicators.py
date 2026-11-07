@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 
 from src.analysis import timeseries as ts
+from src.analysis.data_quality import DataQualityReport, check_statements
 from src.config import (
     INDICATOR_HISTORY_YEARS,
     INDUSTRY_INDICATOR_PROFILES,
@@ -831,6 +832,7 @@ class CompanyData:
     market: dict[str, Any]  # price_metrics output
     prices: pd.Series  # daily close, ascending
     notes: list[str] = field(default_factory=list)
+    data_quality: DataQualityReport | None = None  # statement consistency checks (surfaced, not applied)
 
     @property
     def latest_year(self) -> int | None:
@@ -888,11 +890,13 @@ def load_company(
     if not profile:
         raise ValueError(f"No FMP profile for {symbol} — check the ticker")
 
-    inc = _frame(client.get_income_statement(symbol, limit=years), _I)
+    inc_rows = client.get_income_statement(symbol, limit=years)
+    inc = _frame(inc_rows, _I)
     if inc.empty:
         raise ValueError(f"No income statements for {symbol}")
     parts = [inc]
     notes: list[str] = []
+    stmt_rows: dict[str, list[dict[str, Any]]] = {"income": inc_rows, "balance sheet": [], "cash flow": []}
     for name, fetch, prefix in (
         ("balance sheet", client.get_balance_sheet, _B),
         ("cash flow", client.get_cash_flow, _F),
@@ -900,7 +904,10 @@ def load_company(
         ("key metrics", client.get_key_metrics, "km_"),
     ):
         try:
-            parts.append(_frame(fetch(symbol, limit=years), prefix))
+            rows = fetch(symbol, limit=years)
+            if name in stmt_rows:
+                stmt_rows[name] = rows
+            parts.append(_frame(rows, prefix))
         except FMPError as exc:  # partial data: keep what we have
             logger.warning("%s: %s unavailable: %s", symbol, name, exc)
             notes.append(f"{name} unavailable — dependent indicators blank")
@@ -948,7 +955,11 @@ def load_company(
     prices = load_prices(symbol, client) if with_prices else pd.Series(dtype=float)
     market = price_metrics(prices, bench_prices) if with_prices else price_metrics(pd.Series(dtype=float))
 
+    data_quality = check_statements(
+        stmt_rows["income"], stmt_rows["balance sheet"], stmt_rows["cash flow"], expected_years=years
+    )
     return CompanyData(
+        data_quality=data_quality,
         symbol=symbol,
         company=str(profile.get("companyName") or symbol),
         sector=str(profile.get("sector") or "—"),

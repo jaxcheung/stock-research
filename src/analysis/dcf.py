@@ -12,7 +12,7 @@
 from typing import Any
 
 from src.analysis.business_model import classify
-from src.analysis.data_quality import latest_complete_balance
+from src.analysis.data_quality import check_statements, latest_complete_balance
 from src.config import (
     DCF_CAPTIVE_COD_GAP,
     DCF_DEBT_SPREAD,
@@ -325,7 +325,12 @@ def run_dcf(
         # Reported, but never blended into a price target (research_report._price_target).
         "sanityBandBreach": sanity_breach,
         "businessModel": model.kind,
-        "dataNotes": [bs_note] if bs_note else [],
+        "dataNotes": ([bs_note] if bs_note else [])
+        + [
+            i.message
+            for i in check_statements(income, balance_rows, cash_flows).warnings
+            if i.check not in ("stub row",)  # the balance-sheet stub is already in bs_note
+        ],
     }
 
 

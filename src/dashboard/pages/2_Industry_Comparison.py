@@ -118,7 +118,12 @@ s = rep.subject
 st.markdown(
     "".join(
         f"<span class='rp-tag'>{html.escape(str(x))}</span>"
-        for x in (s.sector, s.industry, SCOPES[rep.filters.scope], f"{rep.profile['label']} profile")
+        for x in (
+            s.sector,
+            s.industry,
+            rep.scope_label or SCOPES[rep.filters.scope],
+            f"{rep.profile['label']} profile",
+        )
     )
     + f"<b>{html.escape(s.company)} ({html.escape(rep.symbol)})</b>",
     unsafe_allow_html=True,
@@ -126,6 +131,18 @@ st.markdown(
 
 if rep.notice:
     st.warning(rep.notice)
+if rep.peer_funnel:
+    with st.expander("Peer funnel — how the peer set was found", expanded=bool(rep.notice)):
+        funnel_df = pd.DataFrame(rep.peer_funnel)
+        tried = list(dict.fromkeys(funnel_df["attempt"])) if "attempt" in funnel_df else []
+        if len(tried) > 1:
+            st.caption("Attempts, in order: " + " → ".join(tried))
+        last = funnel_df[funnel_df["attempt"] == tried[-1]] if tried else funnel_df
+        ui.table(last.drop(columns=["attempt"], errors="ignore"), hide_index=True)
+        st.caption(
+            "Counts per FMP pool (subject excluded). Peers are then loaded individually; any that fail or "
+            "report in a different currency are listed under caveats."
+        )
 if not rep.peers:
     st.warning("No peers matched these filters — widen the size filter, switch scope, or add tickers.")
 
