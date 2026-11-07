@@ -75,10 +75,11 @@ def _claude_code(
     exe = shutil.which("claude")
     if exe is None:
         raise LLMError("`claude` CLI not found — install Claude Code or set LLM_BACKEND=anthropic_api")
+    # The prompt goes on STDIN, not argv: agent prompts carry assembled data and can exceed the
+    # OS per-argument limit (128 KB on Linux), which fails with OSError before Claude starts.
     cmd = [
         exe,
         "-p",
-        prompt,
         "--output-format",
         "json",
         "--system-prompt",
@@ -92,7 +93,7 @@ def _claude_code(
     # The schema goes in the PROMPT and is validated locally: `--json-schema` switches on extra
     # Claude Code machinery (measured 15,001 vs 664 tokens for the same trivial call, 20x cost).
     if schema is not None:
-        cmd[2] = (
+        prompt = (
             prompt
             + "\n\nRespond with ONLY one JSON object (no prose, no code fence) that validates against this "
             + "JSON Schema:\n"
@@ -108,6 +109,7 @@ def _claude_code(
         with tempfile.TemporaryDirectory(prefix="llm-call-") as cwd:
             proc = subprocess.run(
                 cmd,
+                input=prompt,
                 capture_output=True,
                 text=True,
                 timeout=LLM_TIMEOUT_SECONDS,
@@ -116,7 +118,7 @@ def _claude_code(
                 env=_child_env(),
             )
         result = json.loads(proc.stdout)
-    except (subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as exc:
         usage.is_error, usage.error = True, f"{type(exc).__name__}: {str(exc)[:200]}"
         usage.duration_ms = int((time.monotonic() - start) * 1000)
         record(usage)

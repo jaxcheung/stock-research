@@ -73,6 +73,31 @@ def _sector_cap(w: pd.Series, sectors: pd.Series, cap: float) -> pd.Series:
     return w
 
 
+def _enforce_caps(w: pd.Series, sectors: pd.Series | None, pos_cap: float, sec_cap: float) -> pd.Series:
+    """Alternate position water-fill and sector scaling until both hold; if they can't both hold
+    with a fully-invested book (e.g. too few names, or every name in one or two sectors), clip
+    hard and leave the remainder in CASH rather than silently breaching a cap."""
+    w = w / w.sum()
+    for _ in range(20):
+        w = _cap_weights(w, pos_cap)
+        if sectors is not None:
+            w = _sector_cap(w, sectors, sec_cap)
+        ok = bool((w <= pos_cap + 1e-9).all())
+        if sectors is not None:
+            ok = ok and bool(
+                (w.groupby(sectors.reindex(w.index).fillna("Unknown")).sum() <= sec_cap + 1e-9).all()
+            )
+        if ok:
+            return w / w.sum()
+    w = w.clip(upper=pos_cap)
+    if sectors is not None:
+        sec = sectors.reindex(w.index).fillna("Unknown")
+        tot = w.groupby(sec).sum()
+        scale = (sec_cap / tot).clip(upper=1.0)
+        w = w * sec.map(scale).astype(float)
+    return w  # sums to < 1: the residual is held in cash at the risk-free rate
+
+
 def build_weights(scores: pd.Series, ctx: Context, strategy: Strategy, top_n: int | None = None) -> pd.Series:
     scores = scores.replace([np.inf, -np.inf], np.nan).dropna()
     if scores.empty:
@@ -87,11 +112,8 @@ def build_weights(scores: pd.Series, ctx: Context, strategy: Strategy, top_n: in
     if w.empty:
         return w
     if strategy.kind == "stock":
-        w = _cap_weights(w, max(BACKTEST_MAX_WEIGHT, 1.0 / len(w)))
-        w = _sector_cap(w, ctx.data.sectors, BACKTEST_SECTOR_CAP)
-    else:
-        w = _cap_weights(w, max(BACKTEST_ETF_MAX_WEIGHT, 1.0 / len(w)))
-    return w / w.sum()
+        return _enforce_caps(w, ctx.data.sectors, BACKTEST_MAX_WEIGHT, BACKTEST_SECTOR_CAP)
+    return _enforce_caps(w, None, max(BACKTEST_ETF_MAX_WEIGHT, 1.0 / len(w)), 1.0)
 
 
 def run_backtest(
@@ -122,6 +144,7 @@ def run_backtest(
     missing = 0
     thin_months: list[str] = []
     thin_signal: list[str] = []
+    cap_cash: list[str] = []
     for t, t_next in zip(dates[:-1], dates[1:], strict=True):
         if strategy.kind == "stock":
             uni, fund, cap = universe_at(data, t)
@@ -139,6 +162,8 @@ def run_backtest(
         ):
             thin_signal.append(t.strftime("%Y-%m"))
         target = build_weights(scores, ctx, strategy, top_n)
+        if not target.empty and float(target.sum()) < 0.999:
+            cap_cash.append(t.strftime("%Y-%m"))
         if target.empty and not strategy.cash_when_empty:
             target = prev.copy()  # nothing to do this month: hold (drifted) positions
         names = target.index.union(prev.index)
@@ -177,6 +202,12 @@ def run_backtest(
             f"{len(thin_signal)} month(s) where the signal covered fewer stocks than the {strategy.top_n or top_n or BACKTEST_TOP_N} "
             f"it should hold ({thin_signal[0]}–{thin_signal[-1]}), so the portfolio was more concentrated — e.g. growth "
             "needs two filed years of revenue."
+        )
+    if cap_cash:
+        res.notes.append(
+            f"{len(cap_cash)} month(s) where the position cap ({BACKTEST_MAX_WEIGHT:.0%}) and sector cap "
+            f"({BACKTEST_SECTOR_CAP:.0%}) could not both be met fully invested ({cap_cash[0]}–{cap_cash[-1]}); "
+            "the excess was held in cash."
         )
     if missing:
         res.notes.append(

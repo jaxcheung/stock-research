@@ -7,9 +7,11 @@
 #     (HAC) standard errors (timeseries.ols_hac) — alpha reported with t-stat, p-value and n;
 #     tracking error and information ratio.
 #   - Overfitting controls:
-#       * Deflated Sharpe ratio (Bailey & Lopez de Prado, 2014): probability the Sharpe is > 0
-#         after accounting for the number of strategies tried, their Sharpe dispersion, and
-#         non-normal returns (skew, kurtosis).
+#       * Deflated Sharpe ratio (Bailey & Lopez de Prado, 2014) applied to ACTIVE returns vs the
+#         benchmark (i.e. a deflated information ratio): probability the strategy truly beats the
+#         benchmark after allowing for the number of strategies ever tried (persistent ledger,
+#         trials.py), their dispersion, and non-normal returns. On raw excess returns it would
+#         only measure the equity premium — SPY itself scored 94%.
 #       * Stationary block bootstrap confidence interval for the Sharpe and for the active return.
 #       * Walk-forward: the best strategy is SELECTED on the in-sample period and judged on the
 #         out-of-sample period it never saw.
@@ -27,6 +29,7 @@ from src.backtest.engine import BacktestResult
 from src.config import (
     BACKTEST_BOOTSTRAP_BLOCK,
     BACKTEST_BOOTSTRAP_SAMPLES,
+    BACKTEST_MIN_EVAL_MONTHS,
     BACKTEST_WALK_FORWARD_TEST_FRACTION,
     STATS_SIGNIFICANCE_LEVEL,
 )
@@ -47,11 +50,11 @@ def metrics(r: pd.Series, rf: pd.Series, turnover: pd.Series | None = None) -> d
     years = len(r) / PPY
     cagr = float(np.prod(1 + r.to_numpy(dtype=float)) ** (1 / years) - 1)
     vol = float(r.std(ddof=1) * np.sqrt(PPY))
-    down = ex[ex < 0]
     sharpe = float(ex.mean() / ex.std(ddof=1) * np.sqrt(PPY)) if ex.std(ddof=1) > 0 else float("nan")
-    sortino = (
-        float(ex.mean() * PPY / (np.sqrt((down**2).mean()) * np.sqrt(PPY))) if len(down) > 1 else float("nan")
-    )
+    # Downside deviation: root-mean-square of min(excess, 0) over ALL months (Sortino & Price),
+    # not the RMS of the negative months only — that overstates downside risk and shrinks Sortino.
+    dd = float(np.sqrt(np.mean(np.minimum(ex.to_numpy(dtype=float), 0.0) ** 2)) * np.sqrt(PPY))
+    sortino = float(ex.mean() * PPY / dd) if dd > 0 else float("nan")
     mdd = max_drawdown(r)
     return {
         "n": len(r),
@@ -161,12 +164,20 @@ def evaluate(
     benchmark: str = "spy",
     controls: tuple[str, ...] = (),
     test_fraction: float = BACKTEST_WALK_FORWARD_TEST_FRACTION,
+    prior_trial_irs: list[float] | None = None,
 ) -> EvaluationReport:
+    """prior_trial_irs: information ratios of OTHER configurations tried before (trial ledger);
+    they count towards the deflated-Sharpe trial number and dispersion."""
     if benchmark not in results:
         raise ValueError(f"benchmark result {benchmark!r} missing")
     if not 0.1 <= test_fraction <= 0.5:
         raise ValueError("test_fraction must be between 0.1 and 0.5")
     bench = results[benchmark].returns
+    if bench.dropna().size < BACKTEST_MIN_EVAL_MONTHS:
+        raise ValueError(
+            f"Evaluation needs at least {BACKTEST_MIN_EVAL_MONTHS} months (got {bench.dropna().size}); "
+            "widen the window"
+        )
     rows = []
     for name, res in results.items():
         m = metrics(res.returns, rf, res.turnover)
@@ -184,17 +195,25 @@ def evaluate(
         )
     table = pd.DataFrame(rows).set_index("strategy")
     trial_names = [n for n in table.index if not table.loc[n, "control"] and n != benchmark]
-    trial_srs = [_num(table.at[n, "sharpe"]) for n in trial_names]
+    # Deflated Sharpe on ACTIVE returns (strategy − benchmark): "does it beat the benchmark after
+    # multiple testing", not "does it beat T-bills" (which any equity portfolio does).
+    active_stats: dict[str, tuple[float, int, float, float]] = {}
     for n in trial_names:
-        d = deflated_sharpe(
-            _num(table.at[n, "sharpe"]),
-            int(_num(table.at[n, "n"])),
-            _num(table.at[n, "skew"]),
-            _num(table.at[n, "kurtosis"]),
-            trial_srs,
+        a = (results[n].returns - bench).dropna()
+        if len(a) < BACKTEST_MIN_EVAL_MONTHS:
+            continue
+        active_stats[n] = (
+            sharpe_annual(a.to_numpy(dtype=float)),
+            len(a),
+            float(stats.skew(a)),
+            float(stats.kurtosis(a, fisher=False)),
         )
+    trial_irs = [v[0] for v in active_stats.values()] + list(prior_trial_irs or [])
+    for n, (ir, n_obs, sk, ku) in active_stats.items():
+        d = deflated_sharpe(ir, n_obs, sk, ku, trial_irs)
         table.loc[n, "deflatedSharpe"] = d["dsr"]
-        table.loc[n, "expectedMaxSharpeByLuck"] = d.get("expectedMaxSharpeByLuck", np.nan)
+        table.loc[n, "nTrials"] = d["nTrials"]
+        table.loc[n, "expectedMaxIRByLuck"] = d.get("expectedMaxSharpeByLuck", np.nan)
 
     # Walk-forward: split the common window by time; select on IS, judge on OOS.
     common = bench.index
@@ -209,6 +228,10 @@ def evaluate(
         wf_rows.append(
             {
                 "strategy": name,
+                "startIS": mi.get("start"),
+                "endIS": mi.get("end"),
+                "startOOS": mo.get("start"),
+                "endOOS": mo.get("end"),
                 "sharpeIS": mi.get("sharpe"),
                 "sharpeOOS": mo.get("sharpe"),
                 "alphaIS": vi.get("alphaAnnual"),
@@ -228,12 +251,13 @@ def evaluate(
                 "sharpeIS": _num(cand.at[best, "sharpeIS"]),
                 "sharpeOOS": _num(cand.at[best, "sharpeOOS"]),
                 "benchSharpeOOS": _num(wf.at[benchmark, "sharpeOOS"]),
-                "alphaOOS": cand.loc[best, "alphaOOS"],
-                "alphaPOOS": cand.loc[best, "alphaPOOS"],
+                "alphaOOS": _num(cand.at[best, "alphaOOS"]),
+                "alphaPOOS": _num(cand.at[best, "alphaPOOS"]),
+                "nOOS": int(len(bench[bench.index >= split_at])),
             }
         )
     rep = EvaluationReport(table, wf, selection)
-    rep.findings = _findings(rep, benchmark, trial_names)
+    rep.findings = _findings(rep, benchmark, trial_names, len(trial_irs))
     rep.methodology = _methodology(benchmark, test_fraction)
     rep.caveats = _caveats(results)
     return rep
@@ -250,7 +274,7 @@ def _fmt(v: Any, f: str) -> str:
     return format(v, f) if isinstance(v, int | float) and np.isfinite(v) else "n/a"
 
 
-def _findings(rep: EvaluationReport, benchmark: str, trials: list[str]) -> list[str]:
+def _findings(rep: EvaluationReport, benchmark: str, trials: list[str], n_trials: int) -> list[str]:
     t, out = rep.table, []
     b = t.loc[benchmark]
     out.append(
@@ -268,8 +292,8 @@ def _findings(rep: EvaluationReport, benchmark: str, trials: list[str]) -> list[
         dsr = r.get("deflatedSharpe")
         out.append(
             f"**{name}**: alpha {_fmt(r['alphaAnnual'], '+.1%')}/yr (t = {_fmt(r['alphaT'], '.2f')}, "
-            f"p = {_fmt(r['alphaP'], '.3f')}, n = {int(r['n'])}), deflated Sharpe probability "
-            f"{_fmt(dsr, '.0%')} given {len(trials)} strategies tried"
+            f"p = {_fmt(r['alphaP'], '.3f')}, n = {int(r['n'])}), deflated-Sharpe probability of beating "
+            f"{benchmark.upper()} {_fmt(dsr, '.0%')} given {n_trials} configurations ever tried"
             + (
                 " — does NOT survive the multiple-testing adjustment."
                 if isinstance(dsr, float) and dsr < 0.95
@@ -279,21 +303,21 @@ def _findings(rep: EvaluationReport, benchmark: str, trials: list[str]) -> list[
     sel = rep.selection
     if "best" in sel:
         oos_beats = _num(sel["sharpeOOS"]) > _num(sel["benchSharpeOOS"])
+        p_oos = _num(sel.get("alphaPOOS"))
+        significant = p_oos < STATS_SIGNIFICANCE_LEVEL and _num(sel.get("alphaOOS")) > 0
+        verdict = (
+            "did NOT beat the benchmark out of sample."
+            if not oos_beats
+            else "beat it out of sample with significant alpha."
+            if significant
+            else "had a higher Sharpe out of sample, but its alpha is NOT statistically significant — "
+            "not evidence of an edge."
+        )
         out.append(
             f"Walk-forward: picking the best in-sample strategy (**{sel['best']}**, Sharpe {_fmt(sel['sharpeIS'], '.2f')} "
             f"before {sel['splitAt']}) gave an out-of-sample Sharpe of {_fmt(sel['sharpeOOS'], '.2f')} vs the "
-            f"benchmark's {_fmt(sel['benchSharpeOOS'], '.2f')} — it "
-            + ("held up." if oos_beats else "did NOT beat the benchmark out of sample.")
-        )
-    if "placebo_random" in t.index:
-        pr = t.loc["placebo_random"]
-        out.append(
-            f"Placebo (random picks): alpha {_fmt(pr.get('alphaAnnual'), '+.1%')}/yr, p = {_fmt(pr.get('alphaP'), '.2f')} — "
-            + (
-                "no significant alpha, as expected (sanity check passed)."
-                if not _num(pr.get("alphaP")) < STATS_SIGNIFICANCE_LEVEL
-                else "SIGNIFICANT — something in the pipeline is biased; do not trust other results."
-            )
+            f"benchmark's {_fmt(sel['benchSharpeOOS'], '.2f')}; OOS alpha {_fmt(sel.get('alphaOOS'), '+.1%')}/yr "
+            f"(p = {_fmt(p_oos, '.2f')}, n = {sel.get('nOOS')} months) — it " + verdict
         )
     return out
 
@@ -304,12 +328,15 @@ def _methodology(benchmark: str, test_fraction: float) -> list[str]:
         "FOLLOWING month; transaction costs = turnover × cost bps; uninvested weight earns the 3-month T-bill.",
         "Point-in-time: fundamentals usable only from max(filing/acceptance date, fiscal year end + 60 days) + 1 day; "
         "universe membership uses market cap = month-end close × shares from the latest filed statement.",
+        "Sortino uses downside deviation over all months (target = T-bill). "
         f"Sharpe/Sortino on excess returns over T-bills, annualised ×√12. Alpha/beta vs {benchmark.upper()} from an "
         "excess-return regression with Newey-West (HAC) standard errors; alpha shown with t, p and n.",
-        "Deflated Sharpe (Bailey & López de Prado 2014): probability the strategy's TRUE Sharpe is above zero after "
-        "allowing for the best Sharpe expected from luck across all strategies tried and for skew/kurtosis. It tests "
-        "'is there any edge at all', not 'does it beat SPY' — that is the alpha test. Controls (benchmark, "
-        "equal-weight, placebo) are not counted as trials.",
+        f"Deflated Sharpe (Bailey & López de Prado 2014) on ACTIVE returns vs {benchmark.upper()} (a deflated "
+        "information ratio): probability the strategy truly beats the benchmark after allowing for the best result "
+        "expected from luck across EVERY configuration ever tried (persistent trial ledger — re-running one "
+        "strategy at a time does not reset the count) and for skew/kurtosis. Controls are not counted as trials.",
+        "Placebo: many random-pick portfolios (different seeds), gross of costs, regressed on the equal-weight "
+        "universe. About 5% should look 'significant' by chance; materially more flags a biased pipeline.",
         "95% confidence intervals by stationary block bootstrap (6-month blocks, 2,000 resamples, fixed seed).",
         f"Walk-forward: the last {test_fraction:.0%} of months are held out; the strategy with the best in-sample "
         "Sharpe is selected and judged only on the held-out months.",
@@ -318,10 +345,14 @@ def _methodology(benchmark: str, test_fraction: float) -> list[str]:
 
 def _caveats(results: dict[str, BacktestResult]) -> list[str]:
     out = [
-        "Survivorship bias: the stock universe is today's US-listed companies ≥ $2bn; companies that were delisted, "
+        "Survivorship bias: the stock universe is built from companies listed today; companies that were delisted, "
         "acquired or went bankrupt are absent, which flatters stock strategies (ETF results are less affected).",
         "Sector labels are today's FMP classification, applied to all history.",
         "Annual fundamentals only (Starter tier): signals update once a year per company, lagging quarterly data.",
+        "Fundamentals are FMP's current (restated) figures, not as originally filed; the filing date gates WHEN a "
+        "year is used, but restatements made later are visible to the backtest (mild look-ahead).",
+        "Value signals (E/P, B/P) use only companies reporting in USD — price is in USD, so non-USD reporters "
+        "(Canadian, UK, Chinese filers) would need FX conversion (currency rule).",
         "Past performance — even out of sample — does not guarantee future results. Research only, not advice.",
     ]
     miss = sum(r.missing_returns for r in results.values())

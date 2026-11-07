@@ -8,7 +8,7 @@ import streamlit as st
 
 from src.backtest.data import BacktestData, load_backtest_data
 from src.backtest.lab import LabReport, run_lab
-from src.backtest.strategies import CONTROLS, STRATEGIES
+from src.backtest.strategies import NON_TRIALS, STRATEGIES
 from src.config import BACKTEST_BENCHMARK, BACKTEST_COST_BPS
 from src.dashboard import ui
 from src.reporting import charts
@@ -34,7 +34,7 @@ def _run(strategies: tuple[str, ...], start: str, cost: float) -> LabReport:
     return run_lab(list(strategies), start=start, cost_bps=cost, data=_data())
 
 
-trials = [n for n in STRATEGIES if n not in CONTROLS]
+trials = [n for n in STRATEGIES if n not in NON_TRIALS]
 with st.form("lab"):
     c1, c2, c3 = st.columns([4, 2, 2])
     picked = c1.multiselect(
@@ -42,7 +42,8 @@ with st.form("lab"):
         trials,
         default=["multi_factor", "momentum_12_1", "quality_gp", "sector_dual_momentum"],
         format_func=lambda n: f"{n} — {STRATEGIES[n].description}",
-        help="Every strategy you add counts as a trial in the deflated Sharpe ratio: testing more makes the bar higher.",
+        help="Every configuration ever run is recorded in a trial ledger and counts towards the deflated Sharpe: "
+        "testing more raises the bar, and running strategies one at a time does not reset it.",
     )
     start = c2.text_input("Start (month-end)", value="2011-01-31")
     cost = c3.number_input("Cost (bps per unit turnover)", 0.0, 100.0, float(BACKTEST_COST_BPS), 1.0)
@@ -70,7 +71,7 @@ ev = rep.evaluation
 bench = BACKTEST_BENCHMARK.lower()
 ui.findings(ev.findings)
 
-tested = [n for n in rep.results if n not in CONTROLS and n != bench]
+tested = [n for n in rep.results if n not in NON_TRIALS and n != bench]
 colors = {n: charts.series_color(t, i) for i, n in enumerate(tested)}
 curves = rep.equity_curves()
 ui.chart(charts.equity_curve_chart(curves, t, bench, colors), key="eq")
@@ -90,9 +91,12 @@ show = pd.DataFrame(
         "Alpha / yr": tab.get("alphaAnnual"),
         "Alpha p": tab.get("alphaP"),
         "Info ratio": tab.get("informationRatio"),
-        "Deflated Sharpe": tab.get("deflatedSharpe"),
+        "Deflated IR (P beats SPY)": tab.get("deflatedSharpe"),
+        "Trials": tab.get("nTrials"),
         "Avg turnover": tab["avgTurnover"],
         "Months": tab["n"],
+        "Start": tab["start"],
+        "End": tab["end"],
         "Control": tab["control"],
     }
 )
@@ -106,7 +110,8 @@ st.dataframe(
             "Alpha / yr": "{:+.1%}",
             "Alpha p": "{:.3f}",
             "Info ratio": "{:.2f}",
-            "Deflated Sharpe": "{:.0%}",
+            "Deflated IR (P beats SPY)": "{:.0%}",
+            "Trials": "{:.0f}",
             "Avg turnover": "{:.0%}",
         },
         na_rep="—",
@@ -114,18 +119,31 @@ st.dataframe(
     width="stretch",
 )
 st.caption(
-    "Alpha from an excess-return regression on SPY with Newey-West (HAC) standard errors. Deflated Sharpe = "
-    "probability the Sharpe beats the best expected by luck across all strategies tried (controls excluded)."
+    "Alpha from an excess-return regression on SPY with Newey-West (HAC) standard errors. Deflated IR = "
+    "deflated Sharpe of the ACTIVE return vs SPY: the probability the strategy truly beats SPY after allowing "
+    "for the best result expected by luck across every configuration ever tried (Trials; controls excluded)."
 )
 
 st.markdown("##### Walk-forward (out-of-sample)")
 ui.chart(charts.walk_forward_chart(ev.walk_forward, t, bench), key="wf")
 sel = ev.selection
 if "best" in sel:
+    p_oos = sel.get("alphaPOOS")
     st.caption(
         f"Split at {sel['splitAt']}: the best in-sample strategy was **{sel['best']}**; its out-of-sample "
-        f"Sharpe was {sel['sharpeOOS']:.2f} vs SPY's {sel['benchSharpeOOS']:.2f}."
+        f"Sharpe was {sel['sharpeOOS']:.2f} vs SPY's {sel['benchSharpeOOS']:.2f}"
+        + (
+            f" (OOS alpha p = {p_oos:.2f}, n = {sel.get('nOOS')} months)."
+            if isinstance(p_oos, float)
+            else "."
+        )
     )
+pl = rep.placebo.get("table")
+if isinstance(pl, pd.DataFrame) and not pl.empty:
+    with st.expander(f"Placebo detail — {len(pl)} random-pick portfolios"):
+        st.dataframe(
+            pl.style.format({"alphaAnnual": "{:+.1%}", "alphaP": "{:.3f}"}), width="stretch", hide_index=True
+        )
 ui.report_footer(
     ev.methodology,
     ev.caveats + rep.data_notes,

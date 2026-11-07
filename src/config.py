@@ -302,6 +302,14 @@ BACKTEST_MIN_HISTORY_MONTHS = 13  # momentum 12-1 needs 13 month-ends of prices 
 BACKTEST_WALK_FORWARD_TEST_FRACTION = 0.3  # last 30% of months held out as out-of-sample
 BACKTEST_BOOTSTRAP_BLOCK = 6  # months per block in the stationary block bootstrap
 BACKTEST_BOOTSTRAP_SAMPLES = 2000
+# Minimum months for an evaluation (HAC alpha, bootstrap and deflated Sharpe need >= 24).
+BACKTEST_MIN_EVAL_MONTHS = 24
+# Random-pick placebo: this many seeds, GROSS of costs, judged against the equal-weight universe.
+# Expect about 5% of seeds "significant" at the 5% level; materially more means a biased pipeline.
+BACKTEST_PLACEBO_SEEDS = 20
+# Persistent record of every strategy configuration ever evaluated, so the deflated Sharpe's
+# trial count can't be gamed by running strategies one at a time (gitignored, under data/).
+BACKTEST_TRIAL_LEDGER_PATH = ROOT_DIR / "data" / "backtest_trials.db"
 
 # 52/53-week fiscal years ending within this many days into January belong to the prior year
 FISCAL_YEAR_END_GRACE_DAYS = 14

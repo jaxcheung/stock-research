@@ -56,7 +56,16 @@ class Strategy:
 
 def universe_at(data: BacktestData, t: pd.Timestamp) -> tuple[list[str], pd.DataFrame, pd.Series]:
     """(eligible stocks, fundamentals as of t, market cap at t). Eligible = US-listed stock with
-    enough price history, a price at t, and point-in-time cap >= BACKTEST_MIN_CAP."""
+    enough price history, a price at t, and point-in-time cap >= BACKTEST_MIN_CAP. Memoised per
+    date on `data` (every strategy in a suite sees the same universe)."""
+    key = ("universe", t)
+    if key not in data.memo:
+        data.memo[key] = _universe_at(data, t)
+    uni, fund, cap = data.memo[key]
+    return list(uni), fund, cap
+
+
+def _universe_at(data: BacktestData, t: pd.Timestamp) -> tuple[list[str], pd.DataFrame, pd.Series]:
     fund = data.fundamentals_asof(t)
     if t not in data.close.index:
         return [], fund, pd.Series(dtype=float)
@@ -106,15 +115,24 @@ def low_vol(ctx: Context) -> pd.Series:
     return -_volatility(ctx, ctx.universe)
 
 
+def _usd_reporting(f: pd.DataFrame) -> pd.DataFrame:
+    """Currency guard (CLAUDE.md rule): price/market cap is in USD, so a statement-based value
+    multiple is only meaningful when the company reports in USD. Non-USD reporters (CAD, GBP,
+    CNY, ...) drop out of value signals; ratios within one currency (GP/assets, growth) stay."""
+    if "currency" not in f:
+        return f
+    return f[f["currency"].fillna("USD").str.upper() == "USD"]
+
+
 def value_ep(ctx: Context) -> pd.Series:
-    f = ctx.fundamentals.reindex(ctx.universe)
-    return (f["netIncome"] / ctx.market_cap.reindex(ctx.universe)).dropna()
+    f = _usd_reporting(ctx.fundamentals.reindex(ctx.universe))
+    return (f["netIncome"] / ctx.market_cap.reindex(f.index)).dropna()
 
 
 def value_bp(ctx: Context) -> pd.Series:
-    f = ctx.fundamentals.reindex(ctx.universe)
+    f = _usd_reporting(ctx.fundamentals.reindex(ctx.universe))
     eq = f["equity"].where(f["equity"] > 0)  # negative book equity: no meaningful B/P
-    return (eq / ctx.market_cap.reindex(ctx.universe)).dropna()
+    return (eq / ctx.market_cap.reindex(f.index)).dropna()
 
 
 def quality_gp(ctx: Context) -> pd.Series:
@@ -138,10 +156,19 @@ def multi_factor(ctx: Context) -> pd.Series:
     return z.mean(axis=1, skipna=True)[z.notna().sum(axis=1) >= 3]  # need 3 of 4 factors
 
 
-def random_placebo(ctx: Context) -> pd.Series:
-    """Placebo: random scores (seeded by date). Must show no significant alpha."""
-    rng = np.random.default_rng(int(ctx.t.strftime("%Y%m")))
+def random_placebo(ctx: Context, seed: int = 0) -> pd.Series:
+    """Placebo: random scores (seeded by seed and date). Must show no significant alpha."""
+    rng = np.random.default_rng([seed, int(ctx.t.strftime("%Y%m"))])
     return pd.Series(rng.standard_normal(len(ctx.universe)), index=ctx.universe)
+
+
+def make_placebo(seed: int) -> Strategy:
+    return Strategy(
+        f"placebo_{seed}",
+        "stock",
+        lambda ctx: random_placebo(ctx, seed),
+        f"Random scores, seed {seed} (placebo)",
+    )
 
 
 def universe_equal_weight(ctx: Context) -> pd.Series:
@@ -224,4 +251,6 @@ STRATEGIES: dict[str, Strategy] = {
         Strategy("placebo_random", "stock", random_placebo, "Random scores (placebo; expect no alpha)"),
     ]
 }
-CONTROLS = ("universe_ew", "sector_ew", "spy", "placebo_random")
+CONTROLS = ("universe_ew", "sector_ew", "spy")
+# Never counted as a strategy trial: the placebo (run as many seeds by the lab).
+NON_TRIALS = (*CONTROLS, "placebo_random")

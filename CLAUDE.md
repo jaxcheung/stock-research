@@ -216,11 +216,19 @@ Built incrementally, starting cheap:
   only from max(filing/acceptance date, fiscal year end + `BACKTEST_MIN_REPORT_LAG_DAYS`) + 1 day
   (FMP shows filingDate == period end for some predecessor rows). Universe membership uses
   month-end close × shares from the latest filed statement. Returns are dividend-adjusted, earned
-  the FOLLOWING month, net of turnover × `BACKTEST_COST_BPS`; partial trailing months are dropped.
-  Every suite reports HAC alpha (t, p, n), bootstrap CIs, a **deflated Sharpe** over all
-  strategies tried, a random-pick **placebo**, and a **walk-forward** selection judged out of
-  sample. Survivorship bias (no delisted names on Starter) is always stated. Reports say plainly
-  when nothing beats SPY.
+  the FOLLOWING month, net of turnover × `BACKTEST_COST_BPS`. A filing counts at a rebalance only if
+  available by the month's last TRADING day; a month is complete only if the benchmark's prices
+  reach its last session (keyed to the data, never the wall clock). One row per fiscal year
+  (stubs/duplicates deduped); growth only between two full years (330–400 days apart). Value
+  signals use USD reporters only (currency rule). Position and sector caps are never breached:
+  if infeasible, the excess sits in cash (noted).
+  Every suite reports HAC alpha (t, p, n), bootstrap CIs, a **deflated Sharpe on ACTIVE returns
+  vs SPY** (on excess over T-bills it just measures the equity premium) whose trial count comes
+  from a persistent ledger (`trials.py`, `data/backtest_trials.db`) so one-at-a-time runs can't
+  reset it, a **multi-seed gross placebo** vs the equal-weight universe (binomial test on the share
+  "significant"), and a **walk-forward** selection judged out of sample WITH its OOS alpha p-value.
+  Survivorship bias, today's-listing universe and restated (not as-filed) statements are always
+  stated. Reports say plainly when nothing beats SPY.
 - **AI agents are evaluated FORWARD only.** Claude's training data contains past market outcomes,
   so an LLM-driven historical backtest is contaminated by construction. Rule-based strategies are
   backtested; AI decisions are logged with timestamps and scored later (paper ledger), against the
@@ -439,7 +447,7 @@ scripts like `~/bedrock_setup.sh` are outside the project and the repo).
   (`STRATEGIES`: factor signals, sector-ETF rotation, controls incl. placebo; `universe_at`),
   `engine.py` (`run_backtest`: monthly long-only, caps, sector cap, costs, cash at rf),
   `evaluate.py` (metrics, HAC alpha, IR, deflated Sharpe, block bootstrap, walk-forward),
-  `lab.py` (`run_lab` suite orchestrator). `src/dashboard/pages/11_Backtest_Lab.py`.
+  `lab.py` (`run_lab` suite orchestrator + `run_placebo`), `trials.py` (persistent trial ledger). `src/dashboard/pages/11_Backtest_Lab.py`.
 - `src/llm/` — `backend.py` (`complete(agent, system, prompt, schema)`; `claude_code` / `anthropic_api`)
   and `usage.py` (SQLite ledger + `summary(group_by)` for the budget review).
 - `src/data/store.py` prices: `upsert_prices` / `load_prices` (`data/store/fmp/prices/daily/`);
