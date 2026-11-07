@@ -1477,3 +1477,69 @@ def category_bars(
     _layout(fig, t, title, subtitle, height=360)
     fig.update_layout(hovermode="closest", showlegend=False)
     return fig
+
+
+# =========================================================================== Backtest Lab
+
+
+def equity_curve_chart(curves: pd.DataFrame, t: Theme, bench: str, colors: dict[str, str]) -> go.Figure:
+    """Growth of $1 (log scale, one axis). Benchmark dashed ink; highlighted strategies coloured;
+    other series grey."""
+    fig = go.Figure()
+    order = [c for c in curves.columns if c not in colors and c != bench] + [
+        c for c in [bench, *colors] if c in curves.columns
+    ]
+    for name in order:
+        col = colors.get(name)
+        is_b = name == bench
+        fig.add_trace(
+            go.Scatter(
+                x=curves.index,
+                y=curves[name],
+                mode="lines",
+                name=name,
+                showlegend=bool(col) or is_b,
+                line={
+                    "color": t.ink if is_b else (col or t.neutral_mark),
+                    "width": 2 if (col or is_b) else 1,
+                    "dash": "dash" if is_b else None,
+                },
+                hovertemplate="$%{y:.2f}<extra>" + name + "</extra>",
+            )
+        )
+    fig.update_yaxes(type="log", title_text="Growth of $1 (log scale)")
+    return _layout(
+        fig, t, "Growth of $1 — net of costs", "Monthly rebalancing · total return · log scale", 460
+    )
+
+
+def walk_forward_chart(wf: pd.DataFrame, t: Theme, bench: str) -> go.Figure:
+    """In-sample vs out-of-sample Sharpe per strategy (grouped bars, one axis)."""
+    d = wf[["sharpeIS", "sharpeOOS"]].dropna(how="all").sort_values("sharpeIS", ascending=False)
+    fig = go.Figure()
+    for col, label, color in (
+        ("sharpeIS", "In-sample", t.series[0]),
+        ("sharpeOOS", "Out-of-sample", t.series[1]),
+    ):
+        fig.add_trace(
+            go.Bar(
+                x=list(d.index),
+                y=d[col],
+                name=label,
+                marker={"color": color},
+                hovertemplate="%{y:.2f}<extra>" + label + "</extra>",
+            )
+        )
+    if bench in d.index:
+        fig.add_hline(
+            y=float(pd.to_numeric(d.loc[bench, "sharpeOOS"])),
+            line={"color": t.ink, "width": 1.5, "dash": "dash"},
+            annotation_text=f"{bench.upper()} out-of-sample",
+            annotation_position="top right",
+        )
+    fig.update_yaxes(title_text="Sharpe ratio (annualised)")
+    _layout(
+        fig, t, "Walk-forward: does in-sample performance survive?", "Sharpe before vs after the split", 420
+    )
+    fig.update_layout(barmode="group", hovermode="x unified")
+    return fig

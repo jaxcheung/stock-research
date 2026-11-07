@@ -53,6 +53,10 @@ def home() -> None:
                 "Fundamentals Explorer",
                 "10-year income-statement panel (Parquet + DuckDB): sector trends, leaderboard, SQL.",
             ),
+            (
+                "Backtest Lab",
+                "Point-in-time factor and sector-ETF backtests vs SPY, with deflated Sharpe and walk-forward.",
+            ),
         ],
         "Portfolio": [
             ("Portfolio", "Record transactions; FIFO realised and live unrealised PnL."),
@@ -97,6 +101,7 @@ nav = st.navigation(
             st.Page(PAGES / "8_Rate_Sensitivity.py", title="Rate Sensitivity", icon="🏦"),
             st.Page(PAGES / "9_Relative_Valuation.py", title="Relative Valuation", icon="⚖️"),
             st.Page(PAGES / "10_Fundamentals_Explorer.py", title="Fundamentals Explorer", icon="🗄️"),
+            st.Page(PAGES / "11_Backtest_Lab.py", title="Backtest Lab", icon="🧮"),
         ],
         "Portfolio": [
             st.Page(PAGES / "4_Portfolio.py", title="Portfolio", icon="💼"),

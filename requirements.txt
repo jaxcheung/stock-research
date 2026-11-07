@@ -13,3 +13,4 @@ pyarrow==25.0.1
 # Not currently imported anywhere in src/ — candidates for removal:
 matplotlib==3.10.9
 yfinance==1.7.0
+jsonschema==4.26.0  # validates LLM agent JSON output (src/llm/backend.py)
