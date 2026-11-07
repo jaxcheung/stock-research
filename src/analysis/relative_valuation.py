@@ -36,7 +36,9 @@ from src.config import (
     PEER_AGG_MEDIAN_GAP,
     PEER_DOMINANCE_SHARE,
     PEER_EPS_TTM_DIVERGENCE,
+    PEER_MAX_SINGLE_SHARE,
     PEER_METHOD_BY_KIND,
+    PEER_MIN_EFFECTIVE_N,
     PEER_PE_EPS_SWING,
     PEER_ROE_GAP_CAVEAT_PP,
     PEER_ROE_MIN_SPREAD,
@@ -798,6 +800,7 @@ class PeerValuation:
     # False when the implied price rests on an assumption flagged in notes; the report
     # shows it but never blends it into a price target.
     reliable: bool = True
+    unreliable_reason: str | None = None  # shown wherever the implied price is excluded
 
 
 def _multiple_stats(df: pd.DataFrame, den: str, method: str) -> tuple[float | None, float | None]:
@@ -887,6 +890,7 @@ def peer_valuation(
                 if own_n == 0:
                     pv.scope = "Related industries only (none in own industry)"
                     pv.reliable = False
+                    pv.unreliable_reason = "all peers come from adjacent industries (different business mix)"
                     pv.notes.append(
                         f"No peer from {symbol}'s own FMP industry survived — every peer comes from an adjacent "
                         "industry, so the multiple compares different businesses; shown as indicative only."
@@ -913,8 +917,19 @@ def peer_valuation(
         top_i = shares.idxmax()
         top_sym, top_share = str(chosen.loc[top_i, "symbol"]), float(shares.max())
         apart = abs(pv.peer_aggregate / pv.peer_median - 1)
-        if top_share > PEER_DOMINANCE_SHARE and apart > PEER_AGG_MEDIAN_GAP:
+        eff_n = 1.0 / float((shares**2).sum())
+        if eff_n < PEER_MIN_EFFECTIVE_N or top_share > PEER_MAX_SINGLE_SHARE:
             pv.reliable = False
+            pv.unreliable_reason = (
+                f"peer set is effectively one company ({top_sym} {top_share:.0%} of peer cap)"
+            )
+            pv.notes.append(
+                f"Peer market cap is concentrated in {top_sym} ({top_share:.0%}; effective peer count "
+                f"{eff_n:.1f}) — a one-company comparison, so the peer-implied value is indicative only."
+            )
+        elif top_share > PEER_DOMINANCE_SHARE and apart > PEER_AGG_MEDIAN_GAP:
+            pv.reliable = False
+            pv.unreliable_reason = f"aggregate dominated by {top_sym} and {apart:.0%} from the peer median"
             pv.notes.append(
                 f"The aggregate is dominated by {top_sym} ({top_share:.0%} of peer market cap) and sits "
                 f"{apart:.0%} from the peer median ({pv.peer_aggregate:.2f}× vs {pv.peer_median:.2f}×) — it "
@@ -978,6 +993,7 @@ def peer_valuation(
             )
         else:
             pv.reliable = False
+            pv.unreliable_reason = "P/B could not be ROE-adjusted (see peer notes)"
             if sr is None or pr is None:
                 why = "subject or peer ROE unavailable"
             elif pr - g < PEER_ROE_MIN_SPREAD:

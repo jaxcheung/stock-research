@@ -214,7 +214,10 @@ def _check_identities(
         cont_disc = (cont + disc) if (cont is not None and disc) else None  # DELL: 521 + 5,008 = 5,529
         if close(ni) or close(cont) or close(cont_disc):
             continue
-        if close(pretax):
+        # Pre-tax mis-mapping is only distinguishable when tax is material: for REITs/BDCs/NOL
+        # years pre-tax ≈ net income (O 2025: tax 20m on 1.08bn) and the test would misfire.
+        tax_material = pretax is not None and abs(pretax - ni) > 5 * tol * abs(ni)
+        if tax_material and close(pretax):
             rep.issues.append(
                 Issue(
                     "warn",

@@ -142,8 +142,13 @@ Built incrementally, starting cheap:
   - A related-only peer set is marked unreliable (indicative).
   - P/E peers with latest-FY EPS change outside `PEER_PE_EPS_SWING` are skipped as
     cyclical-peak or one-off earnings (SNDK +752%).
-  - An aggregate dominated by one peer (> `PEER_DOMINANCE_SHARE` of Σcap) that is also more
-    than `PEER_AGG_MEDIAN_GAP` from the median is unreliable.
+  - An aggregate is unreliable when the peer set is effectively one company (effective peer
+    count 1/Σw² < `PEER_MIN_EFFECTIVE_N`, or one peer > `PEER_MAX_SINGLE_SHARE` of Σcap —
+    GOOGL vs META 97%), or when one peer is > `PEER_DOMINANCE_SHARE` AND the aggregate is more
+    than `PEER_AGG_MEDIAN_GAP` from the median (DELL vs ANET). Excluded methods that point the
+    other way are disclosed next to the verdict, but don't veto it.
+  - If the whole-sector fallback finds fewer comparable peers than the best industry attempt,
+    the industry attempt is kept and the result is labelled thin (GOOGL).
 - **Data quality (`src/analysis/data_quality.py`).** Stub statement rows (latest period with
   equity and liabilities zero, or assets < `STUB_STATEMENT_ASSET_RATIO` of the prior period)
   are never read as real: analyses fall back to the prior period — balance sheet AND the
@@ -153,12 +158,14 @@ Built incrementally, starting cheap:
   CFO − capex, income vs cash-flow net income tie-out (accepted when cash-flow NI matches
   attributable, continuing, or continuing + discontinued income; minority interests and
   discontinued operations are info notes; a match to PRE-TAX income is a mis-mapping
-  warning (TSM); an unexplained gap > 10% is a warning), stub rows anywhere in the history,
+  warning (TSM), tested only when tax is material, so REITs/BDCs don't misfire; an unexplained
+  gap > 10% is a warning), stub rows anywhere in the history,
   transition periods (< 300 days),
   missing or duplicate periods, bad dates, revenue jumps, share-count changes, equity sign flips,
   unmapped fields (material last year, 0 now) and mixed reporting currencies. Thresholds are
-  `DQ_*` in config. Stub periods are excluded from indicators (`drop_stub_rows`) and from
-  the DCF base year (noted). Surfaced on the Stock Analysis page, in the research report (section plus
+  `DQ_*` in config. Stub periods (income, balance and cash flow) are excluded from indicators
+  (`drop_stub_rows`; growth across the gap is NaN) and from the DCF (every dropped period is
+  noted; FCF CAGR is measured over elapsed fiscal years). Surfaced on the Stock Analysis page, in the research report (section plus
   a Key Risks line) and as DCF data notes; `store_audit` gives raw counts for the Parquet
   store. Add new deterministic checks here, never as silent corrections.
 - **SEC EDGAR** reconciliation is the next data-quality round. It is disabled until the user

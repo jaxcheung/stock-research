@@ -107,7 +107,9 @@ def summarize_valuation(
             f"Peer {peer.method_label}",
             peer.implied_price,
             bool(peer.reliable),
-            None if peer.reliable else "rests on an unadjusted multiple (see peer notes)",
+            None
+            if peer.reliable
+            else (getattr(peer, "unreliable_reason", None) or "flagged unreliable (see peer notes)"),
         )
 
     eligible = [m for m in methods if m.eligible and m.upside is not None]
@@ -123,6 +125,24 @@ def summarize_valuation(
     # The divergence warning uses the SAME rule as the verdict (it fired on -9% vs -11%).
     divergent = disagree
     note = "; ".join(f"{m.name} {m.upside:+.0%}" for m in eligible) if disagree else None
+    # An EXCLUDED method pointing the other way doesn't veto the verdict (it was excluded for a
+    # reason), but the reader must see it (DELL: DCF -61% "Rich" while peers said +65%).
+    if not disagree and eligible:
+        side = sum(m.upside or 0 for m in eligible) / len(eligible)
+        opposite = [
+            m
+            for m in methods
+            if not m.eligible
+            and m.upside is not None
+            and abs(m.upside) > abs(RICH_UPSIDE)
+            and (m.upside > 0) != (side > 0)
+        ]
+        if opposite:
+            divergent = True
+            note = "; ".join(
+                [f"{m.name} {m.upside:+.0%} (credible)" for m in eligible]
+                + [f"{m.name} {m.upside:+.0%} (excluded: {m.reason}) points the other way" for m in opposite]
+            )
 
     def build(**kw: Any) -> ValuationSummary:
         return ValuationSummary(methods=methods, divergent=divergent, divergence_note=note, **kw)

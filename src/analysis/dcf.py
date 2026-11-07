@@ -71,14 +71,15 @@ def _validate_dcf_inputs(
         raise ValueError(f"cost_of_debt must be between 0% and 50%, got {cost_of_debt:.2%}")
 
 
-def _fcf_cagr(fcf_history: list[float]) -> float:
-    """CAGR from oldest to newest FCF. Falls back to 5% if the series
-    doesn't support a clean CAGR (e.g. negative or zero starting FCF).
+def _fcf_cagr(fcf_history: list[float], years_elapsed: float | None = None) -> float:
+    """CAGR from oldest to newest FCF over `years_elapsed` (fiscal years between the end
+    points; defaults to rows - 1, which is wrong when a stub row was dropped). Falls back to
+    5% if the series doesn't support a clean CAGR (e.g. negative or zero starting FCF).
     """
     if len(fcf_history) < 2 or fcf_history[0] <= 0 or fcf_history[-1] <= 0:
         logger.warning("FCF history unsuitable for CAGR, defaulting growth rate to 5%%")
         return 0.05
-    periods = len(fcf_history) - 1
+    periods = years_elapsed if years_elapsed and years_elapsed > 0 else len(fcf_history) - 1
     return (fcf_history[-1] / fcf_history[0]) ** (1 / periods) - 1
 
 
@@ -113,10 +114,19 @@ def run_dcf(
     # A stub latest cash-flow row (CFO and capex both 0) must not silently become, or silently
     # skip, the base year — drop it explicitly and say so in dataNotes.
     cash_flows = drop_stub_rows(cash_rows, "cash flow")
+    kept = {id(r) for r in cash_flows}
+    dropped = [r for r in cash_rows if id(r) not in kept]
     cf_note = (
-        f"[stub row · {cash_rows[0].get('fiscalYear')}] latest cash-flow statement is an incomplete stub; "
-        f"base FCF uses {cash_flows[0].get('date')} instead"
-        if cash_rows and cash_flows and cash_rows[0] is not cash_flows[0]
+        "[stub row · "
+        + ", ".join(str(r.get("fiscalYear")) for r in dropped)
+        + "] incomplete cash-flow period(s) excluded from the DCF"
+        + (
+            f"; base FCF uses {cash_flows[0].get('date')}"
+            if cash_rows and cash_rows[0] in dropped and cash_flows
+            else ""
+        )
+        + " — FCF growth is measured over elapsed fiscal years"
+        if dropped
         else None
     )
     income = client.get_income_statement(symbol, limit=1)
@@ -180,7 +190,12 @@ def run_dcf(
     if fcf_growth_rate is not None:
         growth_rate = fcf_growth_rate
     else:
-        raw_growth = _fcf_cagr(fcf_history)
+        fy = [
+            int(r["fiscalYear"])
+            for r in cash_flows
+            if str(r.get("fiscalYear", "")).isdigit() and r.get("freeCashFlow") is not None
+        ]
+        raw_growth = _fcf_cagr(fcf_history, (max(fy) - min(fy)) if len(fy) >= 2 else None)
         lo, hi = DCF_DERIVED_GROWTH_BOUNDS
         growth_rate = min(max(raw_growth, lo), hi)
         growth_clamped = growth_rate != raw_growth

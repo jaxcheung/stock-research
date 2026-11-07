@@ -512,6 +512,11 @@ PEER_PE_EPS_SWING = (-0.67, 2.0)
 # (DELL vs ANET 52%: 30.9x vs median 23.6x; COF vs AXP 74%: 3.5x vs 1.9x) -> not credible.
 PEER_DOMINANCE_SHARE = 0.50
 PEER_AGG_MEDIAN_GAP = 0.25
+# Concentration alone: a "peer set" that is effectively one company (effective peer count
+# 1/Σw² below this, or one peer above PEER_MAX_SINGLE_SHARE of Σcap) is a one-company
+# comparison even when it agrees with the median (GOOGL vs META 97%, META vs GOOG 99%).
+PEER_MIN_EFFECTIVE_N = 2.0
+PEER_MAX_SINGLE_SHARE = 0.75
 
 # Industry-specific indicator profiles. A company's FMP industry is matched
 # (case-insensitive substring) against "industries" first, then its sector

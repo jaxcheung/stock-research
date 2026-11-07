@@ -891,7 +891,7 @@ def load_company(
         raise ValueError(f"No FMP profile for {symbol} — check the ticker")
 
     inc_rows = client.get_income_statement(symbol, limit=years)
-    inc = _frame(inc_rows, _I)
+    inc = _frame(drop_stub_rows(inc_rows, "income"), _I)  # growth across the gap is NaN (_growth)
     if inc.empty:
         raise ValueError(f"No income statements for {symbol}")
     parts = [inc]

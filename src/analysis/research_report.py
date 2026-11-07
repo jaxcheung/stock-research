@@ -258,7 +258,10 @@ def _identify_risks(report: dict[str, Any]) -> list[str]:
     dq = stock.get("dataQuality")
     # The balance-sheet stub already has its own line (dataNotes); don't count it twice.
     dq_warn = [
-        i for i in (dq.warnings if dq else []) if not (i.check == "stub row" and stock.get("dataNotes"))
+        i
+        for i in (dq.warnings if dq else [])
+        # only the balance-sheet stub already has its own line (dataNotes)
+        if not (i.check == "stub row" and i.message.startswith("balance sheet") and stock.get("dataNotes"))
     ]
     if dq is not None and dq_warn:
         risks.append(

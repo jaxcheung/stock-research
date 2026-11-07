@@ -317,6 +317,7 @@ def run_industry_comparison(
         if related:
             attempts.append(([subject.industry, *related], "Industry + related: " + ", ".join(related)))
         found = False
+        best: tuple[int, list[tuple[str, str, float | None]], str, float | None] = (-1, [], "", None)
         for industries, label in attempts:
             for lo_mult in steps:
                 step_funnel: list[dict[str, Any]] = []
@@ -335,6 +336,8 @@ def run_industry_comparison(
                 comparable = sum(int(r.get("same country", 0)) for r in step_funnel) + len(
                     [x for x in candidates if x[1] == "Included manually"]
                 )
+                if comparable > best[0]:
+                    best = (comparable, candidates, step, floor if lo_mult is not None else None)
                 if comparable >= INDUSTRY_COMP_MIN_FOR_AGGREGATE:
                     found, scope_label, used_floor = True, step, (floor if lo_mult is not None else None)
                     break
@@ -370,6 +373,18 @@ def run_industry_comparison(
                 for row in sector_funnel:
                     row["attempt"] = "Whole sector"
                 funnel += sector_funnel
+                sector_comparable = sum(int(r.get("same country", 0)) for r in sector_funnel)
+                if sector_comparable < best[0]:
+                    # The sector (un-relaxed size band) found fewer comparable peers than the best
+                    # industry attempt (GOOGL: 1 vs 2) — keep the industry attempt, and say so.
+                    candidates, scope_label, used_floor = best[1], best[2], best[3]
+                    f = replace(f, scope="industry")
+                    notice = (
+                        f"Too few same-country peers in industry '{subject.industry}' even after relaxing the "
+                        f"size band, and the whole sector found fewer still ({sector_comparable}); using the "
+                        f"best industry attempt — {scope_label} — with only {best[0]} comparable peer(s). "
+                        "Treat peer statistics as thin."
+                    )
             except FMPError as exc:
                 logger.warning("Sector screen failed for %s: %s", symbol, exc)
         if any(r.get("truncated at screener limit") for r in funnel):
