@@ -150,9 +150,10 @@ def run_placebo(
         f"{np.median(tab['alphaAnnual']):+.1%}/yr, {k} of {len(tab)} ({frac:.0%}) significant at "
         f"{STATS_SIGNIFICANCE_LEVEL:.0%} (≈{STATS_SIGNIFICANCE_LEVEL:.0%} expected by chance; binomial p = {p_binom:.2f}) — "
         + (
-            "MORE than chance: something in the pipeline is biased; do not trust other results."
+            "MORE than chance: the weighting/return mechanics are biased; do not trust other results."
             if biased
-            else "consistent with chance (sanity check passed)."
+            else "consistent with chance. This checks the engine's weighting and return mechanics only: random "
+            "picks and the reference share one universe, so it CANNOT detect survivorship or selection look-ahead."
         )
     )
     return {

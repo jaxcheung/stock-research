@@ -24,6 +24,7 @@ import pandas as pd
 
 from src.backtest.data import BacktestData
 from src.config import BACKTEST_MIN_CAP, BACKTEST_MIN_HISTORY_MONTHS, BACKTEST_SECTOR_ETFS
+from src.data.sync import PREFERRED_SYMBOL
 
 
 @dataclass
@@ -78,7 +79,10 @@ def _universe_at(data: BacktestData, t: pd.Timestamp) -> tuple[list[str], pd.Dat
     eligible = [
         str(s)
         for s, c in cap.items()
-        if c >= BACKTEST_MIN_CAP and s not in etfs and bool(enough.get(s, False))
+        if c >= BACKTEST_MIN_CAP
+        and s not in etfs
+        and not PREFERRED_SYMBOL.search(str(s))  # preferred: issuer's shares x a $25 preferred price
+        and bool(enough.get(s, False))
     ]
     return sorted(eligible), fund, cap
 
@@ -124,8 +128,13 @@ def _usd_reporting(f: pd.DataFrame) -> pd.DataFrame:
     return f[f["currency"].fillna("USD").str.upper() == "USD"]
 
 
+def _full_year(f: pd.DataFrame) -> pd.DataFrame:
+    """Drop part-year transition periods: their flows (earnings, gross profit) aren't annual."""
+    return f[f["fullYear"].fillna(True).astype(bool)] if "fullYear" in f else f
+
+
 def value_ep(ctx: Context) -> pd.Series:
-    f = _usd_reporting(ctx.fundamentals.reindex(ctx.universe))
+    f = _full_year(_usd_reporting(ctx.fundamentals.reindex(ctx.universe)))
     return (f["netIncome"] / ctx.market_cap.reindex(f.index)).dropna()
 
 
@@ -136,7 +145,7 @@ def value_bp(ctx: Context) -> pd.Series:
 
 
 def quality_gp(ctx: Context) -> pd.Series:
-    f = ctx.fundamentals.reindex(ctx.universe)
+    f = _full_year(ctx.fundamentals.reindex(ctx.universe))
     return (f["grossProfit"] / f["totalAssets"].where(f["totalAssets"] > 0)).dropna()
 
 

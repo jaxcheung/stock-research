@@ -305,8 +305,11 @@ def _findings(rep: EvaluationReport, benchmark: str, trials: list[str], n_trials
         oos_beats = _num(sel["sharpeOOS"]) > _num(sel["benchSharpeOOS"])
         p_oos = _num(sel.get("alphaPOOS"))
         significant = p_oos < STATS_SIGNIFICANCE_LEVEL and _num(sel.get("alphaOOS")) > 0
+        untestable = not np.isfinite(p_oos)
         verdict = (
-            "did NOT beat the benchmark out of sample."
+            f"the out-of-sample window is too short to test alpha (n < {BACKTEST_MIN_EVAL_MONTHS} months)."
+            if untestable and oos_beats
+            else "did NOT beat the benchmark out of sample."
             if not oos_beats
             else "beat it out of sample with significant alpha."
             if significant

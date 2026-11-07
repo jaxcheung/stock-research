@@ -67,6 +67,10 @@ def record(
 
 
 def load(path: Path = BACKTEST_TRIAL_LEDGER_PATH) -> pd.DataFrame:
+    if not path.exists():  # reading never creates the ledger
+        return pd.DataFrame(
+            columns=["key", "strategy", "params", "info_ratio", "n_obs", "first_seen", "last_seen"]
+        )
     try:
         with closing(_connect(path)) as conn:
             return pd.read_sql_query("SELECT * FROM trials ORDER BY first_seen", conn)

@@ -48,7 +48,15 @@ _NON_EQUITY = re.compile(
 )
 
 
+# Preferred lines often carry the ISSUER's name ("Consumers Energy Company" for CMS-PB), so the
+# name test misses them; FMP marks them with a -P / -P<letter> symbol suffix. Share classes
+# (BRK-B, BF-B, MOG-A) are common equity and stay.
+PREFERRED_SYMBOL = re.compile(r"-P[A-Z]?$")
+
+
 def is_operating_equity(row: dict[str, Any]) -> bool:
+    if PREFERRED_SYMBOL.search(str(row.get("symbol") or "")):
+        return False
     return not _NON_EQUITY.search(row.get("companyName") or "")
 
 

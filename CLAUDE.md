@@ -220,7 +220,9 @@ Built incrementally, starting cheap:
   available by the month's last TRADING day; a month is complete only if the benchmark's prices
   reach its last session (keyed to the data, never the wall clock). One row per fiscal year
   (stubs/duplicates deduped); growth only between two full years (330–400 days apart). Value
-  signals use USD reporters only (currency rule). Position and sector caps are never breached:
+  signals use USD reporters only (currency rule); preferred lines (`-P`/`-P<letter>` symbols,
+which carry the issuer's name) are never stock-universe members. The placebo tests engine
+mechanics only — it cannot detect universe/survivorship look-ahead, and must say so. Position and sector caps are never breached:
   if infeasible, the excess sits in cash (noted).
   Every suite reports HAC alpha (t, p, n), bootstrap CIs, a **deflated Sharpe on ACTIVE returns
   vs SPY** (on excess over T-bills it just measures the equity premium) whose trial count comes

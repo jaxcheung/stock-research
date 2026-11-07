@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pandas as pd
+from pandas.tseries.holiday import GoodFriday, USMemorialDay
 
 from src.config import (
     BACKTEST_FILING_LAG_DAYS,
@@ -35,14 +36,22 @@ WITH raw AS (
            coalesce(TRY_CAST(acceptedDate AS DATE), TRY_CAST(filingDate AS DATE)) AS filed,
            revenue, grossProfit, operatingIncome, netIncome, weightedAverageShsOutDil AS shares
     FROM income_annual WHERE period = 'FY'
+), r AS (
+    -- fullYear: the period ends 330-400 days after the previous FILED period (or is the first one).
+    -- A transition stub (ZWS Apr-Dec 2020, 275 days) is not a full year.
+    SELECT *, coalesce(
+               periodEnd - lag(periodEnd) OVER (PARTITION BY symbol ORDER BY periodEnd) BETWEEN 330 AND 400,
+               TRUE) AS fullYear
+    FROM raw
 ), i AS (
     -- One row per company fiscal year (same rule as fundamentals_panel): 52/53-week years ending
-    -- in early January belong to the prior year; prefer a full-year row with revenue over a
-    -- transition stub (LHX FY2019 revenue 0), then the later period.
-    SELECT * FROM raw
+    -- in early January belong to the prior year. Prefer the full-year row over a stub in the same
+    -- year (ZWS: keep FY Mar-2020, not the 9-month Dec-2020 stub), then one with revenue (LHX
+    -- FY2019 revenue 0), then the later period.
+    SELECT * FROM r
     QUALIFY row_number() OVER (
         PARTITION BY symbol, year(periodEnd - INTERVAL {grace} DAY)
-        ORDER BY (coalesce(revenue, 0) > 0) DESC, periodEnd DESC
+        ORDER BY fullYear DESC, (coalesce(revenue, 0) > 0) DESC, periodEnd DESC
     ) = 1
 ), b AS (
     SELECT symbol, CAST(date AS DATE) AS periodEnd,
@@ -54,19 +63,16 @@ WITH raw AS (
 ), j AS (
     SELECT i.*, b.totalAssets, b.equity, b.totalDebt, c.freeCashFlow,
            lag(i.revenue) OVER w AS lagRevenue, lag(i.periodEnd) OVER w AS lagPeriodEnd,
-           lag(i.periodEnd, 2) OVER w AS lag2PeriodEnd
+           lag(i.fullYear) OVER w AS lagFullYear
     FROM i LEFT JOIN b USING (symbol, periodEnd) LEFT JOIN c USING (symbol, periodEnd)
     WINDOW w AS (PARTITION BY i.symbol ORDER BY i.periodEnd)
 )
-SELECT symbol, periodEnd, currency,
+SELECT symbol, periodEnd, currency, fullYear,
        greatest(coalesce(filed, periodEnd + INTERVAL {min_lag} DAY), periodEnd + INTERVAL {min_lag} DAY)
            + INTERVAL {lag} DAY AS availableFrom,
        revenue, grossProfit, operatingIncome, netIncome, shares,
-       -- growth only between two genuine fiscal years: this period ends 330-400 days after the prior
-       -- one, AND the prior one was itself a full year (ZWS's 9-month 2020 transition period ends
-       -- 641 days after FY Mar-2019, so it can't be the base for 2021 growth).
-       CASE WHEN periodEnd - lagPeriodEnd BETWEEN 330 AND 400
-                 AND (lag2PeriodEnd IS NULL OR lagPeriodEnd - lag2PeriodEnd BETWEEN 330 AND 400)
+       -- growth only between two full fiscal years 330-400 days apart (never against a stub)
+       CASE WHEN fullYear AND lagFullYear AND periodEnd - lagPeriodEnd BETWEEN 330 AND 400
             THEN lagRevenue END AS prevRevenue,
        totalAssets, equity, totalDebt, freeCashFlow
 FROM j
@@ -200,10 +206,14 @@ def _universe_source_caveat(db: StoreDB, symbols: list[str]) -> str:
 
 
 def _is_last_session(last: pd.Timestamp, month_end: pd.Timestamp) -> bool:
-    """True if `last` is the final weekday session of its month (weekend/holiday-aware enough for
-    a completeness test: no weekday remains between it and the month-end except holidays)."""
-    rest = pd.bdate_range(last + pd.Timedelta(days=1), month_end)
-    return len(rest) <= 1  # allow one weekday holiday at the end of the month
+    """True if `last` is on/after the month's final NYSE session: the last weekday that isn't a
+    holiday which can fall at a month-end (Memorial Day on 31 May, Good Friday on 31 Mar / 30 Apr;
+    New Year's Day and Christmas aren't month-ends). A store synced one session short of the
+    month-end (e.g. Thu 29 Oct when Fri 30 Oct traded) is NOT complete."""
+    start = month_end.replace(day=1)
+    closed = set(USMemorialDay.dates(start, month_end)) | set(GoodFriday.dates(start, month_end))
+    sessions = [d for d in pd.bdate_range(start, month_end) if d not in closed]
+    return bool(sessions) and last >= sessions[-1]
 
 
 def _risk_free(index: pd.DatetimeIndex) -> pd.Series:
