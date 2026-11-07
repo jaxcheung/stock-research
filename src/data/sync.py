@@ -17,8 +17,16 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+import pandas as pd
+
+from src.config import (
+    BACKTEST_MARKET_ETFS,
+    BACKTEST_PRICE_START,
+    BACKTEST_SECTOR_ETFS,
+    SYNC_DEFAULT_YEARS,
+    SYNC_UNIVERSE_MIN_CAP,
+)
 from src.config import STORE_STATEMENT_MAX_AGE_HOURS as MAX_AGE
-from src.config import SYNC_DEFAULT_YEARS, SYNC_UNIVERSE_MIN_CAP
 from src.data import store
 from src.data.fmp_client import FMPClient, FMPError, normalize_symbol
 from src.utils.logging import get_logger
@@ -150,6 +158,47 @@ def sync_statements(
     return rep
 
 
+def sync_prices(
+    symbols: list[str],
+    start: str,
+    max_age_hours: float = MAX_AGE,
+    client: FMPClient | None = None,
+    progress: Callable[[int, int, str], None] | None = None,
+) -> SyncReport:
+    """Daily split-adjusted close AND dividend-adjusted close per symbol into the store
+    (two calls each). Total-return backtests use adjClose; point-in-time market cap uses
+    close x shares from the latest filed statement."""
+    if not symbols:
+        raise ValueError("symbols must be non-empty")
+    client = client or FMPClient()
+    rep = SyncReport(universe="prices", requested=len(symbols))
+    syms = list(dict.fromkeys(normalize_symbol(s) for s in symbols))
+    for i, sym in enumerate(syms):
+        if progress:
+            progress(i, len(syms), sym)
+        age = store.file_age_hours(store.price_path(sym))
+        if age is not None and age < max_age_hours:
+            rep.skipped_fresh.append(sym)
+            continue
+        try:
+            full = client.get_price_history_full(sym, start=start)
+            adj = client.get_price_history_adjusted(sym, start=start)
+            if not full or not adj:
+                rep.empty.append(sym)
+                continue
+            f = pd.DataFrame(full)[["date", "close", "volume"]]
+            a = pd.DataFrame(adj)[["date", "adjClose"]]
+            rep.rows_stored += store.upsert_prices(sym, f.merge(a, on="date", how="inner"))
+            rep.downloaded.append(sym)
+        except (FMPError, ValueError, OSError, KeyError) as exc:
+            rep.failed[sym] = str(exc)
+            logger.warning("Price sync %s failed: %s", sym, exc)
+        if (i + 1) % 100 == 0:
+            logger.info("Price sync progress %d/%d (%d failed)", i + 1, len(syms), len(rep.failed))
+    logger.info(rep.summary())
+    return rep
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Download FMP statements into the local Parquet store")
     ap.add_argument("--universe", default="us_large", help="name for the company-list snapshot")
@@ -162,6 +211,13 @@ def main() -> None:
     ap.add_argument("--period", default="annual", choices=["annual", "quarter"])
     ap.add_argument("--years", type=int, default=SYNC_DEFAULT_YEARS)
     ap.add_argument("--max-age-hours", type=float, default=MAX_AGE)
+    ap.add_argument(
+        "--prices",
+        action="store_true",
+        help="also sync daily close + dividend-adjusted close for the symbols and the backtest ETFs",
+    )
+    ap.add_argument("--no-statements", action="store_true", help="skip statements (prices only)")
+    ap.add_argument("--price-start", default=BACKTEST_PRICE_START)
     args = ap.parse_args()
 
     client = FMPClient()
@@ -184,9 +240,13 @@ def main() -> None:
         symbols = [
             r["symbol"] for r in build_universe(args.universe, args.min_cap, args.country or None, client)
         ]
-    sync_statements(
-        symbols, args.universe, tuple(args.kinds), args.period, args.years, args.max_age_hours, client
-    )
+    if not args.no_statements:
+        sync_statements(
+            symbols, args.universe, tuple(args.kinds), args.period, args.years, args.max_age_hours, client
+        )
+    if args.prices:
+        etfs = [*BACKTEST_MARKET_ETFS, *BACKTEST_SECTOR_ETFS]
+        sync_prices([*etfs, *symbols], args.price_start, args.max_age_hours, client)
 
 
 if __name__ == "__main__":

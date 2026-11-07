@@ -75,6 +75,44 @@ def series_path(source: str, series_id: str) -> Path:
     return STORE_DIR / "series" / _safe(source.lower()) / f"{_safe(series_id)}.parquet"
 
 
+def price_path(symbol: str) -> Path:
+    return STORE_DIR / "fmp" / "prices" / "daily" / f"{_safe(symbol.upper())}.parquet"
+
+
+def upsert_prices(symbol: str, frame: pd.DataFrame) -> int:
+    """Merge daily prices (columns: date, close, adjClose, volume) into the symbol's file.
+    Newest fetch wins per date (adjusted history is restated after each dividend)."""
+    if frame.empty:
+        return 0
+    path = price_path(symbol)
+    new = frame.copy()
+    new["date"] = pd.to_datetime(new["date"])
+    for c in ("close", "adjClose", "volume"):
+        if c in new:
+            new[c] = pd.to_numeric(new[c], errors="coerce").astype("float64")
+    if path.exists():
+        # adjClose for old dates changes with every new dividend, so a full refresh replaces
+        # the adjusted series rather than merging stale adjusted values with fresh ones.
+        old = pd.read_parquet(path)
+        old = old[~old["date"].isin(new["date"])]
+        merged = pd.concat([old, new], ignore_index=True)
+    else:
+        merged = new
+    merged = merged.sort_values("date").reset_index(drop=True)
+    _atomic_write(merged, path)
+    return len(merged)
+
+
+def load_prices(symbol: str) -> pd.DataFrame:
+    path = price_path(symbol)
+    return pd.read_parquet(path) if path.exists() else pd.DataFrame()
+
+
+def stored_price_symbols() -> list[str]:
+    folder = STORE_DIR / "fmp" / "prices" / "daily"
+    return sorted(p.stem for p in folder.glob("*.parquet")) if folder.exists() else []
+
+
 def universe_path(name: str) -> Path:
     return STORE_DIR / "fmp" / "universes" / f"{_safe(name)}.parquet"
 

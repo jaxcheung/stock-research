@@ -222,6 +222,21 @@ class FMPClient:
             params["from"] = start
         return self._get("historical-price-eod/light", params)
 
+    def get_price_history_full(self, symbol: str, start: str | None = None) -> list[dict[str, Any]]:
+        """Daily OHLCV (split-adjusted close), newest first: [{date, open, high, low, close, volume, ...}]."""
+        params: dict[str, Any] = {"symbol": normalize_symbol(symbol)}
+        if start:
+            params["from"] = start
+        return self._get("historical-price-eod/full", params)
+
+    def get_price_history_adjusted(self, symbol: str, start: str | None = None) -> list[dict[str, Any]]:
+        """Daily dividend- and split-adjusted prices (total-return basis), newest first:
+        [{date, adjOpen, adjHigh, adjLow, adjClose, volume}]. Verified on Starter 2026-11-07."""
+        params: dict[str, Any] = {"symbol": normalize_symbol(symbol)}
+        if start:
+            params["from"] = start
+        return self._get("historical-price-eod/dividend-adjusted", params)
+
     def get_sector_pe_snapshot(self, date: str, exchange: str | None = None) -> list[dict[str, Any]]:
         params: dict[str, Any] = {"date": date}
         if exchange:

@@ -198,7 +198,9 @@ Built incrementally, starting cheap:
   price history, `sector-pe-snapshot`, `industry-pe-snapshot`,
   `historical-sector-pe`, `historical-industry-pe`, `company-screener`,
   `treasury-rates`, `available-industries/sectors/countries`. Premium (402):
-  `batch-quote`, `sp500-constituent`, foreign-exchange tickers. Re-verify
+  `batch-quote`, `sp500-constituent`, foreign-exchange tickers. Also available (verified
+  2026-11-07): `historical-price-eod/full` and `historical-price-eod/dividend-adjusted` (total-return
+  adjusted close back to at least 2010). Re-verify
   before relying on anything not in this list.
 - **Statistical rigor rules (Quant Lab).** Never draw inference from
   correlations of non-stationary levels — ADF-test and use a stationary
@@ -210,6 +212,28 @@ Built incrementally, starting cheap:
   scopes (industry vs sector) are reported side by side, never blended.
   Data-quality screens (e.g. captive-finance interest, duplicate listings,
   survivorship in early years) must be surfaced as caveats, not silently applied.
+- **Backtests are point-in-time and judged honestly (`src/backtest/`).** Fundamentals are usable
+  only from max(filing/acceptance date, fiscal year end + `BACKTEST_MIN_REPORT_LAG_DAYS`) + 1 day
+  (FMP shows filingDate == period end for some predecessor rows). Universe membership uses
+  month-end close × shares from the latest filed statement. Returns are dividend-adjusted, earned
+  the FOLLOWING month, net of turnover × `BACKTEST_COST_BPS`; partial trailing months are dropped.
+  Every suite reports HAC alpha (t, p, n), bootstrap CIs, a **deflated Sharpe** over all
+  strategies tried, a random-pick **placebo**, and a **walk-forward** selection judged out of
+  sample. Survivorship bias (no delisted names on Starter) is always stated. Reports say plainly
+  when nothing beats SPY.
+- **AI agents are evaluated FORWARD only.** Claude's training data contains past market outcomes,
+  so an LLM-driven historical backtest is contaminated by construction. Rule-based strategies are
+  backtested; AI decisions are logged with timestamps and scored later (paper ledger), against the
+  quant-only ablation and the benchmark.
+- **LLM calls go through `src/llm/backend.complete` and are logged to the usage ledger**
+  (`data/llm_usage.db`: tokens, cache write/read, cache-hit rate, list cost, latency, errors).
+  The default backend is headless `claude -p` on the user's Claude Pro subscription (no API key),
+  called LEAN: own system prompt, `--tools ""`, no session persistence, run from an empty temp
+  directory (no CLAUDE.md auto-load), without the parent session's `CLAUDE_CODE_*` environment,
+  with the JSON schema in the prompt and validated locally. Measured 2026-11-07: ~600–730 tokens
+  per trivial call vs ~14.6k–18.6k with defaults; `--json-schema` alone added ~14k. `--bare`
+  needs an API key (not usable on Pro). Agents get data assembled into the prompt by
+  deterministic code and never invent numbers.
 - **Charts follow one convention** (`src/reporting/theme.py`,
   `src/reporting/charts.py`): one y-axis per plot (no dual axes — use small
   multiples or a common base), fixed categorical colour order (validated
@@ -273,6 +297,12 @@ Built incrementally, starting cheap:
 - [x] Data quality, round 1 (2026-11-07): peer funnel and related-industry escalation (fixes
       AAPL's 0 industry peers); statement consistency checks surfaced in the Stock Analysis
       page, the research report and the DCF page; store audit. Next: SEC EDGAR reconciliation.
+- [x] Backtesting + LLM groundwork (2026-11-07, Phases 0+1 of the AI research system): US universe
+      ≥ $2bn + market/sector ETFs; price store (close + dividend-adjusted) and statement sync for
+      ~1,560 companies; point-in-time backtester with factor and sector-ETF strategies, HAC alpha,
+      deflated Sharpe, bootstrap, placebo, walk-forward; Backtest Lab page; LLM backend (`claude -p`
+      on Pro, API stub) with usage/cost ledger. Next: news + regulation feeds, analyst, strategist and
+      PM agents (forward-evaluated), budget review.
 - [ ] News integration into reports (news endpoint exists in `fmp_client.py`,
       not yet wired into analysis output or the dashboard).
 - [x] Quant Lab (2026-11-05): source-agnostic series loader (FRED incl. keyless
@@ -404,6 +434,16 @@ scripts like `~/bedrock_setup.sh` are outside the project and the repo).
   SQL; `sector_trend`, `growth_leaderboard` (small-base CAGR guard),
   `analyze_panel` (findings + methodology + survivorship-bias caveat).
 - `src/dashboard/pages/10_Fundamentals_Explorer.py` — panel UI + sync + SQL workbench.
+- `src/backtest/` — `data.py` (`load_backtest_data` → month-end total-return and close prices,
+  T-bill risk-free rate, point-in-time fundamentals with `fundamentals_asof(t)`), `strategies.py`
+  (`STRATEGIES`: factor signals, sector-ETF rotation, controls incl. placebo; `universe_at`),
+  `engine.py` (`run_backtest`: monthly long-only, caps, sector cap, costs, cash at rf),
+  `evaluate.py` (metrics, HAC alpha, IR, deflated Sharpe, block bootstrap, walk-forward),
+  `lab.py` (`run_lab` suite orchestrator). `src/dashboard/pages/11_Backtest_Lab.py`.
+- `src/llm/` — `backend.py` (`complete(agent, system, prompt, schema)`; `claude_code` / `anthropic_api`)
+  and `usage.py` (SQLite ledger + `summary(group_by)` for the budget review).
+- `src/data/store.py` prices: `upsert_prices` / `load_prices` (`data/store/fmp/prices/daily/`);
+  `sync.py --prices [--no-statements]` (`sync_prices`).
 - `log/` — runtime log output (gitignored).
 - `data/` — local SQLite database(s) (gitignored — personal financial data).
 

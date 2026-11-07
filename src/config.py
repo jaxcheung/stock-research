@@ -168,6 +168,14 @@ KNOWLEDGE_DB_PATH = ROOT_DIR / "data" / "knowledge.db"
 
 # FRED (Federal Reserve Economic Data) — macro/economic indicators
 FRED_API_KEY = os.environ.get("FRED_API_KEY")
+
+# LLM backend for the AI agents (src/llm). "claude_code" = headless `claude -p` on the user's
+# Claude subscription (no API key); "anthropic_api" = Anthropic API (needs ANTHROPIC_API_KEY,
+# billed separately; enables prompt-caching control and the Batch API).
+LLM_BACKEND = os.environ.get("LLM_BACKEND") or "claude_code"
+LLM_MODEL = os.environ.get("LLM_MODEL") or "claude-opus-5-5"
+LLM_TIMEOUT_SECONDS = 600
+LLM_USAGE_DB_PATH = ROOT_DIR / "data" / "llm_usage.db"  # gitignored (data/)
 # SEC EDGAR (data-quality reconciliation, next round). SEC requires a User-Agent with a contact
 # name and email on every request; EDGAR checks stay disabled until the user sets this.
 SEC_USER_AGENT = os.environ.get("SEC_USER_AGENT")
@@ -256,6 +264,44 @@ STORE_DIR = ROOT_DIR / "data" / "store"
 STORE_STATEMENT_MAX_AGE_HOURS = 24 * 7  # bulk sync skips company files refreshed more recently
 SYNC_DEFAULT_YEARS = 10  # annual statements per company (Starter tier returns up to 10)
 SYNC_UNIVERSE_MIN_CAP = 10_000_000_000  # default bulk universe: US-listed companies >= $10B
+
+# ---------------------------------------------------------------- backtesting (src/backtest)
+# Universe: US exchanges only (NYSE / NASDAQ / NYSE American), long-only, mid + large caps.
+BACKTEST_UNIVERSE_NAME = "us_2bn"  # store universe snapshot synced with --min-cap 2e9
+BACKTEST_MIN_CAP = 2_000_000_000  # point-in-time membership floor at each rebalance date
+BACKTEST_PRICE_START = "2010-01-01"  # FMP Starter serves dividend-adjusted EOD back to at least 2010
+# Top-down layer and benchmarks: US-listed market and sector index ETFs.
+BACKTEST_MARKET_ETFS = ["SPY", "RSP", "QQQ", "MDY", "IWM"]
+BACKTEST_SECTOR_ETFS = {
+    "XLK": "Technology",
+    "XLF": "Financial Services",
+    "XLV": "Healthcare",
+    "XLY": "Consumer Cyclical",
+    "XLP": "Consumer Defensive",
+    "XLE": "Energy",
+    "XLI": "Industrials",
+    "XLB": "Basic Materials",
+    "XLU": "Utilities",
+    "XLRE": "Real Estate",
+    "XLC": "Communication Services",
+}
+BACKTEST_BENCHMARK = "SPY"
+BACKTEST_COST_BPS = 10.0  # one-way transaction cost per unit of turnover (commission + spread)
+BACKTEST_MAX_WEIGHT = 0.05  # long-only position cap (stocks); ETF strategies use BACKTEST_ETF_MAX_WEIGHT
+BACKTEST_ETF_MAX_WEIGHT = 0.40
+BACKTEST_SECTOR_CAP = 0.30  # max weight per sector in stock strategies
+BACKTEST_TOP_N = 50  # stocks held by factor strategies
+BACKTEST_FILING_LAG_DAYS = 1
+# ...and never earlier than this many days after the fiscal year end, whatever the filing date
+# says: FMP shows filingDate == period end for some pre-listing/predecessor rows (CEG 2016-20),
+# which would otherwise leak a full year of fundamentals. 10-K deadlines are 60-90 days.
+BACKTEST_MIN_REPORT_LAG_DAYS = 60
+BACKTEST_RISK_FREE_SERIES = "fred:TB3MS"  # 3-month T-bill, % p.a., monthly
+BACKTEST_MIN_UNIVERSE = 100  # a stock strategy needs at least this many eligible stocks at a rebalance
+BACKTEST_MIN_HISTORY_MONTHS = 13  # momentum 12-1 needs 13 month-ends of prices  # a statement is usable from the trading day AFTER its filing/acceptance
+BACKTEST_WALK_FORWARD_TEST_FRACTION = 0.3  # last 30% of months held out as out-of-sample
+BACKTEST_BOOTSTRAP_BLOCK = 6  # months per block in the stationary block bootstrap
+BACKTEST_BOOTSTRAP_SAMPLES = 2000
 
 # 52/53-week fiscal years ending within this many days into January belong to the prior year
 FISCAL_YEAR_END_GRACE_DAYS = 14
