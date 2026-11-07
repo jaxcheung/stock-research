@@ -114,24 +114,21 @@ def summarize_valuation(
     in_band = [m for m in eligible if m.in_band]
     cats = {m.category for m in eligible}
 
-    divergent, note = False, None
-    if len(eligible) >= 2:
-        vals = [m.value for m in eligible]
-        if len(cats) > 1 or (max(vals) - min(vals)) / max(vals) > 0.30:
-            divergent = True
-            note = "; ".join(f"{m.name} {m.upside:+.0%}" for m in eligible)
-
-    def build(**kw: Any) -> ValuationSummary:
-        return ValuationSummary(methods=methods, divergent=divergent, divergence_note=note, **kw)
-
-    # Credible methods pointing to different verdicts: no verdict, whichever one is in band
-    # (GOOGL: peers +50% in band vs DCF -75% was "Attractive, 100/100").
     # Disagreement = opposite verdicts (one Attractive, one Rich) or a gap > 30 points.
     # Neighbouring categories close together (-9% vs -11%) agree — they straddle a band edge.
     ups = [m.upside for m in eligible if m.upside is not None]
     disagree = len(ups) >= 2 and (
         ("Attractive (undervalued)" in cats and "Rich (overvalued)" in cats) or max(ups) - min(ups) > 0.30
     )
+    # The divergence warning uses the SAME rule as the verdict (it fired on -9% vs -11%).
+    divergent = disagree
+    note = "; ".join(f"{m.name} {m.upside:+.0%}" for m in eligible) if disagree else None
+
+    def build(**kw: Any) -> ValuationSummary:
+        return ValuationSummary(methods=methods, divergent=divergent, divergence_note=note, **kw)
+
+    # Credible methods pointing to different verdicts: no verdict, whichever one is in band
+    # (GOOGL: peers +50% in band vs DCF -75% was "Attractive, 100/100").
     if disagree:
         for m in eligible:
             m.reason = m.reason or "credible methods disagree"

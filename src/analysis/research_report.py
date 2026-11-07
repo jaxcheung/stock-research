@@ -120,6 +120,16 @@ def _reconcile_core(rating: str, valuation_verdict: str) -> str:
         )
     if weak_business and cheap:
         return "Looks cheap, but the business is weak — check for a value trap before acting."
+    if cheap:
+        return (
+            "An average-quality business that looks cheap — the valuation case depends on the discount "
+            "being a mispricing rather than a fair reflection of middling fundamentals."
+        )
+    if rich:
+        return (
+            "An average-quality business that looks expensive — the price assumes improvement the "
+            "fundamentals don't yet show."
+        )
     return (
         "Neither quality nor valuation gives a decisive signal — the case rests on your own view "
         "of the assumptions; don't rely on the composite rating alone as a buy/sell signal."

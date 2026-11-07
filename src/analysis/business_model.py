@@ -27,6 +27,7 @@ from typing import Any
 
 from src.config import (
     BDC_INTEREST_INCOME_SHARE,
+    BDC_MIN_EQUITY_TO_ASSETS,
     BROKER_INDUSTRY_KEYWORDS,
     BUSINESS_MODEL_OVERRIDES,
     BUSINESS_MODEL_STRONG_KEYWORDS,
@@ -182,10 +183,22 @@ def classify(
             pct = f"interest income is {share:.0%} of revenue"
             if any(k.lower() in ind for k in BROKER_INDUSTRY_KEYWORDS):
                 if share >= BDC_INTEREST_INCOME_SHARE:
+                    # The 150% asset-coverage limit caps BDC debt at 2x equity, so a BDC's equity
+                    # is at least ~1/3 of assets. Annuity insurers filed under Asset Management
+                    # (CRBG: equity 3% of assets) also show ~100% "interest income".
+                    eq = (balance or {}).get("totalStockholdersEquity")
+                    ta = (balance or {}).get("totalAssets")
+                    eta = eq / ta if eq is not None and ta else None
+                    if eta is None or eta >= BDC_MIN_EQUITY_TO_ASSETS:
+                        return BusinessModel(
+                            "lender",
+                            f"{pct} (>= {BDC_INTEREST_INCOME_SHARE:.0%}) — BDC / closed-end lender",
+                            subtype="bdc",
+                        )
                     return BusinessModel(
                         "lender",
-                        f"{pct} (>= {BDC_INTEREST_INCOME_SHARE:.0%}) — BDC / closed-end lender",
-                        subtype="bdc",
+                        f"{pct}, but equity is only {eta:.0%} of assets — not a BDC (leveraged lender or "
+                        "spread-based insurer)",
                     )
                 return BusinessModel("broker_dealer", f"{pct} — balance-sheet broker / wealth platform")
             return BusinessModel(

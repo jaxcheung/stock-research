@@ -350,7 +350,7 @@ def market_proxy(client: FMPClient, size: int = RELVAL_MARKET_PROXY_SIZE) -> pd.
     """Largest US-listed companies (NASDAQ/NYSE, US-domiciled) with TTM P/E.
     Cached as a whole for the 'market' TTL, since ~size*4 calls build it.
     """
-    key = {"size": size, "minCap": RELVAL_MARKET_PROXY_MIN_CAP, "v": 1}
+    key = {"size": size, "minCap": RELVAL_MARKET_PROXY_MIN_CAP, "v": 2}  # v2: ETF/fund-free screener
     cached = cache_get("relval_market", key, ttl_for("market"))
     if not is_miss(cached):
         return pd.DataFrame(cached)

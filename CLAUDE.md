@@ -78,7 +78,9 @@ Built incrementally, starting cheap:
   `insurer` (life | pc) / `asset_manager` / `reit`, plus a `captive_finance` flag. Order:
   config overrides → strong keywords (REIT, Banks, Insurance) → gross interest income ÷
   revenue (>= 10% lender; in Capital Markets/Asset Management 10–80% broker-dealer, >= 80%
-  lender subtype `bdc`; "REIT - Mortgage" is lender subtype `mreit`) → unmapped-interest test (interest < 0.5% but receivables >= 40% of assets →
+  lender subtype `bdc` only if equity >= 30% of assets — the 150% asset-coverage rule — so
+  annuity insurers filed as Asset Management (CRBG, equity 3%) aren't BDCs; "REIT - Mortgage"
+  is lender subtype `mreit`) → unmapped-interest test (interest < 0.5% but receivables >= 40% of assets →
   lender) → weak keywords → standard. Calibration and every override's reason live in
   `config.py`; overrides are always disclosed in reports. Captive finance = debt-funded
   receivables ((receivables − payables) >= 40% of assets AND debt >= 0.6× receivables), or

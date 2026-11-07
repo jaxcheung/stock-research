@@ -62,6 +62,8 @@ LENDER_INTEREST_INCOME_SHARE = 0.10
 # or above this means a lender or BDC (ARCC 97%); between LENDER_INTEREST_INCOME_SHARE
 # and this, a balance-sheet broker-dealer or wealth platform (SCHW 56%, IBKR 41%, RJF 23%).
 BDC_INTEREST_INCOME_SHARE = 0.80
+# BDCs must hold equity >= this share of assets (150% asset coverage => debt <= 2x equity).
+BDC_MIN_EQUITY_TO_ASSETS = 0.30
 BROKER_INDUSTRY_KEYWORDS = ("Capital Markets", "Investment - Banking", "Asset Management")
 # FMP sometimes leaves interest income unmapped (reported as ~0) for lenders (ENVA,
 # SEZL, KLAR). When the share is below this AND receivables are at least
@@ -105,6 +107,12 @@ BUSINESS_MODEL_OVERRIDES: dict[str, dict[str, Any]] = {
         "subtype": "life",
         "peer_industries": ["Insurance - Life"],
         "reason": "life & retirement insurer filed as Asset Management",
+    },
+    "CRBG": {
+        "kind": "insurer",
+        "subtype": "life",
+        "peer_industries": ["Insurance - Life"],
+        "reason": "life & annuity insurer filed as Asset Management (spread income reads as interest income)",
     },
     "FCFS": {"kind": "lender", "reason": "pawn lender; loans not mapped to receivables or interest income"},
     "EZPW": {"kind": "lender", "reason": "pawn lender; loans not mapped to receivables or interest income"},

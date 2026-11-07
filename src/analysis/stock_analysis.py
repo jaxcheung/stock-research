@@ -41,8 +41,15 @@ def analyze_stock(symbol: str, client: FMPClient | None = None, years: int = 5) 
         logger.warning("%s: %s", symbol, bs_note)
         if period:
             bs_note += " Profitability and leverage ratios use the same prior period."
-    latest_ratios = ratios[period] if len(ratios) > period else {}
-    latest_metrics = key_metrics[period] if len(key_metrics) > period else {}
+
+    def _row_for(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        """Row dated like the balance sheet in use (positional fallback if dates are absent)."""
+        want = latest_bs.get("date")
+        match = next((r for r in rows if want and r.get("date") == want), None)
+        return match or (rows[period] if len(rows) > period else {})
+
+    latest_ratios = _row_for(ratios)
+    latest_metrics = _row_for(key_metrics)
     latest_income = income[0] if income else {}
     prior_income = income[1] if len(income) > 1 else {}
 
