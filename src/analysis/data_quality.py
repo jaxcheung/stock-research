@@ -15,12 +15,34 @@ from typing import Any
 from src.config import (
     DQ_IDENTITY_TOLERANCE,
     DQ_MAX_GAP_DAYS,
+    DQ_MIN_PERIOD_DAYS,
     DQ_REVENUE_JUMP,
     DQ_SHARE_CHANGE,
     DQ_TIEOUT_WARN,
     DQ_UNMAPPED_MATERIALITY,
     STUB_STATEMENT_ASSET_RATIO,
 )
+
+STUB_CORE_FIELDS = {
+    "balance sheet": ("totalLiabilities", "totalStockholdersEquity"),
+    "cash flow": ("operatingCashFlow", "capitalExpenditure"),
+    "income": ("revenue", "netIncome"),
+}
+
+
+def drop_stub_rows(rows: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
+    """Rows minus stub periods (core fields all zero while the next-older row's are not), so
+    indicators are not computed from them (RJF FY2026 ROA read as 1,528%). The stub is still
+    reported by check_statements, which runs on the unfiltered rows."""
+    core = STUB_CORE_FIELDS[kind]
+    out = []
+    for i, r in enumerate(rows):
+        prev = rows[i + 1] if i + 1 < len(rows) else None
+        zero = all((_num(r, k) or 0.0) == 0 for k in core)
+        if zero and prev is not None and any((_num(prev, k) or 0.0) != 0 for k in core):
+            continue
+        out.append(r)
+    return out
 
 
 def is_stub_balance(row: dict[str, Any], prior: dict[str, Any] | None) -> str | None:
@@ -158,44 +180,83 @@ def _check_identities(
         if (_num(c, "operatingCashFlow") or 0.0) == 0 and (_num(c, "capitalExpenditure") or 0.0) == 0:
             continue  # stub cash-flow row — flagged by the stub check, not a tie-out problem
         i_row = inc_by_date.get(str(c.get("date")))
-        ni_i, ni_c = (_num(i_row, "netIncome") if i_row else None), _num(c, "netIncome")
-        if ni_i and ni_c is not None and abs(ni_i - ni_c) > tol * abs(ni_i):
-            gap = abs(ni_i - ni_c) / abs(ni_i)
-            large = gap > DQ_TIEOUT_WARN
+        if not i_row:
+            continue
+        ni_c = _num(c, "netIncome")
+        ni = _num(i_row, "netIncome")
+        cont = _num(i_row, "netIncomeFromContinuingOperations")
+        disc = _num(i_row, "netIncomeFromDiscontinuedOperations")
+        pretax = _num(i_row, "incomeBeforeTax")
+        if ni_c is None or not ni:
+            continue
+
+        def close(x: float | None, ref: float = ni_c) -> bool:
+            return x is not None and x != 0 and abs(ref - x) <= tol * abs(x)
+
+        # Attributable net income differs from consolidated continuing income for two normal
+        # reasons — minority interests (BX, KKR, CHTR) and discontinued operations (SONY FY2025,
+        # GEHC, SAP). That is context, not a data error.
+        if cont and abs(cont - ni) > tol * abs(ni):
+            why = (
+                f"discontinued operations {disc:,.0f}"
+                if disc and abs(disc) > tol * abs(ni)
+                else "minority interests (consolidated vs attributable)"
+            )
             rep.issues.append(
                 Issue(
-                    "warn" if large else "info",
-                    "net income tie-out",
-                    _period(c),
-                    f"income statement {ni_i:,.0f} vs cash-flow statement {ni_c:,.0f} ({gap:.0%} apart) — "
-                    + (
-                        "too large for minority interests alone: discontinued operations, a restatement or a "
-                        "mis-mapped field; check the filing before relying on earnings-based ratios"
-                        if large
-                        else "the cash-flow statement often starts from consolidated income incl. minority interests"
-                    ),
+                    "info",
+                    "attributable vs consolidated",
+                    _period(i_row),
+                    f"net income {ni:,.0f} vs continuing operations {cont:,.0f} — {why}; earnings-based "
+                    "ratios use attributable net income",
                 )
             )
+        cont_disc = (cont + disc) if (cont is not None and disc) else None  # DELL: 521 + 5,008 = 5,529
+        if close(ni) or close(cont) or close(cont_disc):
+            continue
+        if close(pretax):
+            rep.issues.append(
+                Issue(
+                    "warn",
+                    "net income tie-out",
+                    _period(c),
+                    f"cash-flow 'net income' {ni_c:,.0f} equals PRE-TAX income — mis-mapped by the data "
+                    "provider; cash-flow-based figures for this year may be off",
+                )
+            )
+            continue
+        refs = [x for x in (ni, cont, cont_disc) if x]
+        base = min(refs, key=lambda x: abs(ni_c - x))  # the closest explanation
+        gap = abs(ni_c - base) / abs(base)
+        rep.issues.append(
+            Issue(
+                "warn" if gap > DQ_TIEOUT_WARN else "info",
+                "net income tie-out",
+                _period(c),
+                f"cash-flow net income {ni_c:,.0f} matches neither attributable ({ni:,.0f}) nor continuing-"
+                f"operations income ({(cont or 0):,.0f}) — {gap:.0%} apart; possible restatement or "
+                "mis-mapped field",
+            )
+        )
 
 
 def _check_stubs(
     rep: DataQualityReport, name: str, rows: list[dict[str, Any]], core: tuple[str, ...]
 ) -> None:
-    if len(rows) < 2:
-        return
-    latest, prior = rows[0], rows[1]
-    zero_now = all((_num(latest, k) or 0.0) == 0 for k in core)
-    material_before = any((_num(prior, k) or 0.0) != 0 for k in core)
-    if zero_now and material_before:
-        rep.issues.append(
-            Issue(
-                "warn",
-                "stub row",
-                _period(latest),
-                f"latest {name} has {', '.join(core)} all zero while the prior year did not — an incomplete "
-                "filing; analyses fall back to the prior period where they can",
+    """A row whose core fields are all zero while the next-older row's are not — anywhere in
+    the history, not just the latest (LHX's FY2019 transition row has revenue 0)."""
+    for cur, prev in zip(rows, rows[1:], strict=False):
+        if all((_num(cur, k) or 0.0) == 0 for k in core) and any((_num(prev, k) or 0.0) != 0 for k in core):
+            rep.issues.append(
+                Issue(
+                    "warn",
+                    "stub row",
+                    _period(cur),
+                    f"{name} has {', '.join(core)} all zero while the prior year did not — an incomplete "
+                    "filing; this period's figures are unreliable (excluded from indicators; valuation uses "
+                    "the prior period where it can)",
+                )
             )
-        )
 
 
 def _check_completeness(
@@ -207,15 +268,35 @@ def _check_completeness(
         rep.issues.append(
             Issue("warn", "duplicate period", None, f"{name}: fiscal year(s) {', '.join(dupes)} appear twice")
         )
-    dates = sorted(date.fromisoformat(str(r["date"])[:10]) for r in rows if r.get("date"))
+    dates: list[date] = []
+    for r in rows:
+        try:
+            if r.get("date"):
+                dates.append(date.fromisoformat(str(r["date"])[:10]))
+        except ValueError:
+            rep.issues.append(
+                Issue("warn", "bad date", None, f"{name}: unparseable period date {r.get('date')!r}")
+            )
+    dates.sort()
     for a, b in zip(dates, dates[1:], strict=False):
-        if (b - a).days > DQ_MAX_GAP_DAYS:
+        days = (b - a).days
+        if days > DQ_MAX_GAP_DAYS:
             rep.issues.append(
                 Issue(
                     "warn",
                     "missing period",
                     str(b.year),
-                    f"{name}: {(b - a).days} days between {a} and {b} — a year is missing",
+                    f"{name}: {days} days between {a} and {b} — a year is missing",
+                )
+            )
+        elif days < DQ_MIN_PERIOD_DAYS:
+            rep.issues.append(
+                Issue(
+                    "warn",
+                    "transition period",
+                    str(b.year),
+                    f"{name}: period ending {b} covers only ~{days} days (fiscal-year change) — growth rates "
+                    "against it are not like-for-like",
                 )
             )
     if expected and len(rows) < expected:
@@ -247,8 +328,9 @@ def _check_plausibility(
                     "info",
                     "share count",
                     _period(cur),
-                    f"diluted shares {s0:,.0f} → {s1:,.0f} ({s1 / s0 - 1:+.0%}): split, merger or large buyback? "
-                    "Per-share history is not split-adjusted here",
+                    f"diluted shares {s0:,.0f} → {s1:,.0f} ({s1 / s0 - 1:+.0%}) — "
+                    "FMP restates share counts for splits, so this is usually a merger, IPO conversion or "
+                    "large issuance/buyback",
                 )
             )
     for cur, prev in zip(balance, balance[1:], strict=False):
@@ -310,6 +392,20 @@ def _check_currency(rep: DataQualityReport, *statements: list[dict[str, Any]]) -
         )
 
 
+def _dedupe(issues: list[Issue]) -> list[Issue]:
+    """One issue per (check, period) for checks that fire once per statement (a transition
+    period shows in the income, balance and cash-flow statements alike)."""
+    seen: set[tuple[str, str | None]] = set()
+    out = []
+    for i in issues:
+        key = (i.check, i.period)
+        if i.check in ("transition period", "missing period") and key in seen:
+            continue
+        seen.add(key)
+        out.append(i)
+    return out
+
+
 def check_statements(
     income: list[dict[str, Any]],
     balance: list[dict[str, Any]],
@@ -332,4 +428,5 @@ def check_statements(
     _check_identities(rep, balance, cashflow, income)
     _check_plausibility(rep, income, balance)
     _check_unmapped(rep, income, balance)
+    rep.issues = _dedupe(rep.issues)
     return rep

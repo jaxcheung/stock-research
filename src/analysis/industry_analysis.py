@@ -32,6 +32,7 @@ from src.config import (
 )
 from src.data.fmp_client import FMPClient, FMPError, normalize_symbol
 from src.data.sync import is_operating_equity
+from src.reporting.formatting import money
 from src.utils.logging import get_logger
 
 logger = get_logger("industry_analysis")
@@ -156,26 +157,30 @@ def find_peer_candidates(
     cap = subject.market_cap
     if f.scope in ("industry", "sector"):
         lo, hi = _cap_bounds(f, cap, lo_mult)
+        # Size band applied SERVER-side: the screener returns at most INDUSTRY_COMP_SCREEN_LIMIT rows,
+        # largest first, so an unbanded query silently drops small caps (a $300m bank got peers 2-5x
+        # its size). Truncation is recorded in the funnel.
+        band: dict[str, Any] = {"marketCapMoreThan": int(lo)}
+        if hi is not None:
+            band["marketCapLowerThan"] = int(hi)
         if f.scope == "industry":
-            pools = [
-                (ind, {"industry": ind, "marketCapMoreThan": int(INDUSTRY_COMP_MIN_CAP)})
-                for ind in (industries or [subject.industry])
-            ]
+            pools = [(ind, {"industry": ind, **band}) for ind in (industries or [subject.industry])]
         else:
-            filt: dict[str, Any] = {"sector": subject.sector, "marketCapMoreThan": int(lo)}
-            if hi is not None:
-                filt["marketCapLowerThan"] = int(hi)
-            pools = [(subject.sector, filt)]
+            pools = [(subject.sector or "", {"sector": subject.sector, **band})]
         rows_all: list[tuple[str, dict[str, Any]]] = []
         for name, filt in pools:
             if f.us_only:
                 filt["country"] = "US"
+            raw_rows = client.screen_companies(limit=INDUSTRY_COMP_SCREEN_LIMIT, **filt)
+            truncated = len(raw_rows) >= INDUSTRY_COMP_SCREEN_LIMIT
+            # Drop the subject AND its other share classes (BRK-A for BRK-B, GOOG for GOOGL).
             listed = [
                 r
-                for r in client.screen_companies(limit=INDUSTRY_COMP_SCREEN_LIMIT, **filt)
+                for r in raw_rows
                 if r.get("symbol")
+                and r["symbol"] != subject.symbol
+                and r.get("companyName") != subject.company
             ]
-            listed = [r for r in listed if r["symbol"] != subject.symbol]
             eligible = [
                 r
                 for r in listed
@@ -190,15 +195,16 @@ def find_peer_candidates(
                 funnel.append(
                     {
                         "pool": name,
-                        "listed (ex-subject)": len(listed),
+                        "size band": f"{money(lo)} – {money(hi) if hi is not None else 'no cap'}",
+                        "listed in band (ex-subject)": len(listed),
+                        "truncated at screener limit": truncated,
                         "US major exchange, operating equity": len(eligible),
-                        "size filter": len(sized),
-                        "largest excluded by size": ", ".join(
-                            r["symbol"]
-                            for r in sorted(
-                                (r for r in eligible if r not in sized),
-                                key=lambda r: -(r.get("marketCap") or 0),
-                            )[:3]
+                        "kept": len(sized),
+                        # Proxy for "reports in a comparable currency": same country as the subject.
+                        # TM (JPY) and RACE (EUR) used to count toward TSLA's minimum of three.
+                        "same country": sum(1 for r in sized if r.get("country") == subject.country),
+                        "largest kept": ", ".join(
+                            r["symbol"] for r in sorted(sized, key=lambda r: -(r.get("marketCap") or 0))[:3]
                         ),
                     }
                 )
@@ -300,9 +306,11 @@ def run_industry_comparison(
     candidates: list[tuple[str, str, float | None]] = []
     notice = None
     scope_label = SCOPES[f.scope]
+    used_floor: float | None = None
     if f.scope == "industry":
         # Escalation, each step labelled and never blended: own industry → relaxed size band
-        # (mega-caps) → industry + related industries (config) → whole sector.
+        # (mega-caps) → industry + related industries (config) → whole sector. A step succeeds
+        # only with enough SAME-COUNTRY peers (a proxy for a comparable reporting currency).
         related = RELATED_INDUSTRIES.get(subject.industry or "", {}).get("related", [])
         steps = PEER_SIZE_RELAX_STEPS if f.size_mode == "similar" else (None,)
         attempts = [([subject.industry], "Same FMP industry")]
@@ -317,33 +325,42 @@ def run_industry_comparison(
                 except FMPError as exc:
                     logger.warning("Peer screen failed for %s: %s", symbol, exc)
                     candidates = [(s_, "Included manually", None) for s_ in f.include]
+                floor = _cap_bounds(f, subject.market_cap, lo_mult)[0]
+                step = label + (
+                    f" (size ≥ {lo_mult:g}× subject = {money(floor)})" if lo_mult is not None else ""
+                )
                 for row in step_funnel:
-                    row["attempt"] = label + (
-                        f" (size ≥ {lo_mult:g}× subject)" if lo_mult is not None else ""
-                    )
+                    row["attempt"] = step
                 funnel += step_funnel
-                if (
-                    len([x for x in candidates if x[1] != "Included manually"])
-                    >= INDUSTRY_COMP_MIN_FOR_AGGREGATE
-                ):
-                    found, scope_label = True, label
+                comparable = sum(int(r.get("same country", 0)) for r in step_funnel) + len(
+                    [x for x in candidates if x[1] == "Included manually"]
+                )
+                if comparable >= INDUSTRY_COMP_MIN_FOR_AGGREGATE:
+                    found, scope_label, used_floor = True, step, (floor if lo_mult is not None else None)
                     break
             if found:
                 break
-        n_listed = funnel[0]["listed (ex-subject)"] if funnel else 0
-        used = funnel[-1]["attempt"] if funnel else scope_label
+        own_kept = [x for x in candidates if x[1] == SCOPES["industry"]]
+        if found and scope_label.startswith("Industry + related") and not own_kept:
+            scope_label = scope_label.replace(
+                "Industry + related", "Related industries only (none in own industry)"
+            )
         if found and len(funnel) > 1:
-            notice = (
-                f"FMP industry '{subject.industry}' is thin ({n_listed} other listings; see the peer funnel), "
-                f"so the peer set is: {used}."
+            first = funnel[0]
+            cause = (
+                f"no peers within the similar-size band ({first['size band']})"
+                if first["listed in band (ex-subject)"] == 0
+                else f"too few same-country peers within {first['size band']}"
+            )
+            notice = f"FMP industry '{subject.industry}': {cause}. Peer set used: {scope_label}" + (
+                " — the 'similar size' intent is relaxed; see the peer funnel." if used_floor else "."
             )
         elif not found:
             notice = (
-                f"Only {len([x for x in candidates if x[1] != 'Included manually'])} peer(s) in industry "
-                f"'{subject.industry}'"
+                f"Too few same-country peers in industry '{subject.industry}'"
                 + (" and its related industries" if related else "")
-                + f" after relaxing the size band (see the peer funnel), so the peer set uses the whole sector "
-                f"'{subject.sector}' instead (same size/country filters)."
+                + f" even after relaxing the size band (see the peer funnel), so the peer set uses the whole "
+                f"sector '{subject.sector}' instead (similar-size band, same country filter)."
             )
             f = replace(f, scope="sector")
             scope_label = SCOPES["sector"]
@@ -355,6 +372,11 @@ def run_industry_comparison(
                 funnel += sector_funnel
             except FMPError as exc:
                 logger.warning("Sector screen failed for %s: %s", symbol, exc)
+        if any(r.get("truncated at screener limit") for r in funnel):
+            notice = (notice + " " if notice else "") + (
+                f"At least one screen hit the {INDUSTRY_COMP_SCREEN_LIMIT}-row screener limit, so some "
+                "candidates in the size band may be missing."
+            )
         if notice:
             logger.info("%s: %s", symbol, notice)
     else:
@@ -653,10 +675,15 @@ def _methodology(rep: IndustryComparisonReport) -> list[str]:
         "similar": f"{INDUSTRY_COMP_SIMILAR_SIZE_BAND[0]}×–{INDUSTRY_COMP_SIMILAR_SIZE_BAND[1]}× the subject's market cap",
         "buckets": ", ".join(f.cap_buckets),
     }[f.size_mode]
+    used = rep.scope_label or SCOPES[f.scope]
+    if "size ≥" in used:
+        size = "lower size bound relaxed as shown (upper bound 5× the subject's market cap)"
     return [
-        f"Peer universe: **{SCOPES[f.scope]}** ({rep.subject.industry if f.scope == 'industry' else rep.subject.sector}), "
-        f"{size}{', US-domiciled only' if f.us_only else ''}; nearest in size first, share classes de-duplicated, "
-        f"up to {f.max_peers} peers. Scopes are never blended.",
+        f"Peer universe: **{used}** "
+        f"({rep.subject.industry if f.scope == 'industry' else rep.subject.sector}), "
+        f"{size}{', US-domiciled only' if f.us_only else ''}; nearest in size first, the subject's own share classes "
+        f"and duplicate share classes removed, up to {f.max_peers} peers. Scopes are never blended; the peer "
+        "funnel shows each attempt.",
         f"Indicator profile: **{rep.profile['label']}** — default indicators and 'not meaningful' flags are "
         "industry-specific (config.INDUSTRY_INDICATOR_PROFILES).",
         "Annual indicators are computed from FMP annual statements per fiscal year; companies' fiscal years end "

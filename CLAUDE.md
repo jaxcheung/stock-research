@@ -130,22 +130,35 @@ Built incrementally, starting cheap:
   since the screener returns at most 100 rows, largest first.
 - **Thin peer sets are escalated, never silently replaced.** Industry Comparison tries:
   own FMP industry → the similar-size band's lower bound relaxed (`PEER_SIZE_RELAX_STEPS`,
-  for mega-caps) → own industry + `RELATED_INDUSTRIES` (config map with a reason per entry)
-  → whole sector. Each scope is labelled, and a **peer funnel** (listed → US/operating →
-  size filter, per FMP pool and attempt) explains the result. AAPL: "Consumer Electronics"
-  has 7 other listings, none of similar size → hardware/equipment peers (CSCO, ANET, DELL,
-  APH …), not the whole Technology sector. `peer_valuation` uses the same related-industry
-  map ("Industry + related peers").
+  floor shown in dollars) → own + `RELATED_INDUSTRIES` (symmetric config map, a reason per
+  entry) → whole sector. A step succeeds only with enough SAME-COUNTRY peers (proxy for a
+  comparable reporting currency). The subject's own share classes are never peers (BRK-A for
+  BRK-B). The size band is applied SERVER-side; the screener returns at most 200 rows largest
+  first, and truncation is shown. A **peer funnel** explains each attempt, and labels say
+  "Related industries only" when no own-industry peer survives.
+  - In the research report, related industries are a FALLBACK only, used when the own
+    industry yields fewer than `PEER_TARGET_MIN_PEERS` usable peers (applying them always
+    flipped DELL −16% → +19%).
+  - A related-only peer set is marked unreliable (indicative).
+  - P/E peers with latest-FY EPS change outside `PEER_PE_EPS_SWING` are skipped as
+    cyclical-peak or one-off earnings (SNDK +752%).
+  - An aggregate dominated by one peer (> `PEER_DOMINANCE_SHARE` of Σcap) that is also more
+    than `PEER_AGG_MEDIAN_GAP` from the median is unreliable.
 - **Data quality (`src/analysis/data_quality.py`).** Stub statement rows (latest period with
   equity and liabilities zero, or assets < `STUB_STATEMENT_ASSET_RATIO` of the prior period)
   are never read as real: analyses fall back to the prior period — balance sheet AND the
   ratios/key metrics of that period, and FY book for peer P/B when TTM P/B is a stub — and
   surface a "Data quality" note (RJF FY2026 read as "$0 equity" before). `check_statements(income,
   balance, cashflow)` → `DataQualityReport` of warn/info issues: balance identity, FCF =
-  CFO − capex, income vs cash-flow net income tie-out (>10% gap = warning), stub rows,
-  missing or duplicate periods, revenue jumps, share-count changes, equity sign flips,
+  CFO − capex, income vs cash-flow net income tie-out (accepted when cash-flow NI matches
+  attributable, continuing, or continuing + discontinued income; minority interests and
+  discontinued operations are info notes; a match to PRE-TAX income is a mis-mapping
+  warning (TSM); an unexplained gap > 10% is a warning), stub rows anywhere in the history,
+  transition periods (< 300 days),
+  missing or duplicate periods, bad dates, revenue jumps, share-count changes, equity sign flips,
   unmapped fields (material last year, 0 now) and mixed reporting currencies. Thresholds are
-  `DQ_*` in config. Surfaced on the Stock Analysis page, in the research report (section plus
+  `DQ_*` in config. Stub periods are excluded from indicators (`drop_stub_rows`) and from
+  the DCF base year (noted). Surfaced on the Stock Analysis page, in the research report (section plus
   a Key Risks line) and as DCF data notes; `store_audit` gives raw counts for the Parquet
   store. Add new deterministic checks here, never as silent corrections.
 - **SEC EDGAR** reconciliation is the next data-quality round. It is disabled until the user

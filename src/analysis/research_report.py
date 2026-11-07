@@ -256,10 +256,14 @@ def _identify_risks(report: dict[str, Any]) -> list[str]:
         )
 
     dq = stock.get("dataQuality")
-    if dq is not None and dq.warnings:
+    # The balance-sheet stub already has its own line (dataNotes); don't count it twice.
+    dq_warn = [
+        i for i in (dq.warnings if dq else []) if not (i.check == "stub row" and stock.get("dataNotes"))
+    ]
+    if dq is not None and dq_warn:
         risks.append(
-            f"Data quality: {len(dq.warnings)} warning(s) in the source statements "
-            f"({', '.join(dict.fromkeys(i.check for i in dq.warnings))}) — see the Data Quality section "
+            f"Data quality: {len(dq_warn)} warning(s) in the source statements "
+            f"({', '.join(dict.fromkeys(i.check for i in dq_warn))}) — see the Data Quality section "
             "before relying on the affected figures."
         )
 

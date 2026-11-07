@@ -227,6 +227,7 @@ STUB_STATEMENT_ASSET_RATIO = 0.10
 DQ_IDENTITY_TOLERANCE = 0.01  # accounting identities may differ by at most 1% (of assets / CFO / NI)
 DQ_REVENUE_JUMP = 3.0  # YoY revenue x3 or /3: flag (M&A, restatement, or a units error)
 DQ_SHARE_CHANGE = 0.20  # diluted share count moving >20% YoY: split, merger or large buyback?
+DQ_MIN_PERIOD_DAYS = 300  # an "annual" period shorter than this is a transition period (LHX 186d)
 DQ_MAX_GAP_DAYS = 400  # consecutive annual periods further apart than this = a missing year
 DQ_TIEOUT_WARN = 0.10  # income vs cash-flow net income further apart than this = warning, not note
 DQ_UNMAPPED_MATERIALITY = 0.01  # field material last year (>1% of revenue/assets) but 0 now
@@ -466,19 +467,34 @@ PEER_SIZE_RELAX_STEPS = (0.2, 0.05, 0.01)
 # Thin FMP industries -> adjacent FMP industries tried as "industry + related" BEFORE the
 # whole sector (scopes are labelled and never blended). Every entry needs a reason.
 RELATED_INDUSTRIES: dict[str, dict[str, Any]] = {
+    # Kept symmetric: every relation is listed in both directions. Component suppliers ("Hardware,
+    # Equipment & Parts": APH connectors, GLW glass, KEYS test gear) are deliberately NOT
+    # related to device makers.
     "Consumer Electronics": {
-        "related": ["Computer Hardware", "Communication Equipment", "Hardware, Equipment & Parts"],
-        "reason": "8 listings, only SONY large (JPY); device/hardware makers sit in adjacent industries",
+        "related": ["Computer Hardware", "Communication Equipment"],
+        "reason": "7 other listings, only SONY large (reports in JPY); device makers sit in adjacent industries",
     },
     "Computer Hardware": {
         "related": ["Consumer Electronics", "Communication Equipment"],
         "reason": "device and networking hardware are split across these FMP industries",
     },
     "Communication Equipment": {
-        "related": ["Computer Hardware", "Hardware, Equipment & Parts"],
-        "reason": "only CSCO and MSI are large; networking hardware sits in Computer Hardware",
+        "related": ["Computer Hardware", "Consumer Electronics"],
+        "reason": "only CSCO and MSI are large; networking hardware also sits in Computer Hardware",
     },
-}  # "similar size" = 0.2x-5x of the subject's market cap
+    "Insurance - Diversified": {
+        "related": ["Insurance - Property & Casualty", "Insurance - Life"],
+        "reason": "few US-listed diversified insurers (BRK fell back to banks and card networks)",
+    },
+    "Insurance - Property & Casualty": {
+        "related": ["Insurance - Diversified"],
+        "reason": "symmetric counterpart of Insurance - Diversified",
+    },
+    "Insurance - Life": {
+        "related": ["Insurance - Diversified"],
+        "reason": "symmetric counterpart of Insurance - Diversified",
+    },
+}
 INDUSTRY_COMP_MIN_FOR_AGGREGATE = 3  # fewer companies than this -> aggregate not reported
 # Market-cap buckets (USD, lower bound inclusive / upper exclusive; None = unbounded)
 CAP_SIZE_BUCKETS: dict[str, tuple[float, float | None]] = {
@@ -488,6 +504,14 @@ CAP_SIZE_BUCKETS: dict[str, tuple[float, float | None]] = {
     "Small ($300M–2B)": (300e6, 2e9),
     "Micro (< $300M)": (0.0, 300e6),
 }
+# P/E peers whose latest-FY EPS changed outside this range are skipped as cyclical-peak or
+# one-off earnings (SNDK +752%, WDC +374% made AAPL look 46% overvalued vs hardware peers).
+PEER_PE_EPS_SWING = (-0.67, 2.0)
+# A Σcap÷Σdenominator aggregate dominated by one peer (> this share of Σcap) that also sits
+# more than PEER_AGG_MEDIAN_GAP from the peer median measures that one company, not the group
+# (DELL vs ANET 52%: 30.9x vs median 23.6x; COF vs AXP 74%: 3.5x vs 1.9x) -> not credible.
+PEER_DOMINANCE_SHARE = 0.50
+PEER_AGG_MEDIAN_GAP = 0.25
 
 # Industry-specific indicator profiles. A company's FMP industry is matched
 # (case-insensitive substring) against "industries" first, then its sector

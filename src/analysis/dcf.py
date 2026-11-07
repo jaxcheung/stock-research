@@ -12,7 +12,7 @@
 from typing import Any
 
 from src.analysis.business_model import classify
-from src.analysis.data_quality import check_statements, latest_complete_balance
+from src.analysis.data_quality import check_statements, drop_stub_rows, latest_complete_balance
 from src.config import (
     DCF_CAPTIVE_COD_GAP,
     DCF_DEBT_SPREAD,
@@ -109,7 +109,16 @@ def run_dcf(
 
     quote = client.get_quote(symbol)
     profile = client.get_profile(symbol)
-    cash_flows = client.get_cash_flow(symbol, limit=5)
+    cash_rows = client.get_cash_flow(symbol, limit=5)
+    # A stub latest cash-flow row (CFO and capex both 0) must not silently become, or silently
+    # skip, the base year — drop it explicitly and say so in dataNotes.
+    cash_flows = drop_stub_rows(cash_rows, "cash flow")
+    cf_note = (
+        f"[stub row · {cash_rows[0].get('fiscalYear')}] latest cash-flow statement is an incomplete stub; "
+        f"base FCF uses {cash_flows[0].get('date')} instead"
+        if cash_rows and cash_flows and cash_rows[0] is not cash_flows[0]
+        else None
+    )
     income = client.get_income_statement(symbol, limit=1)
     balance_rows = client.get_balance_sheet(symbol, limit=2)
     latest_bs, bs_note = latest_complete_balance(balance_rows)
@@ -326,10 +335,12 @@ def run_dcf(
         "sanityBandBreach": sanity_breach,
         "businessModel": model.kind,
         "dataNotes": ([bs_note] if bs_note else [])
+        + ([cf_note] if cf_note else [])
         + [
-            i.message
-            for i in check_statements(income, balance_rows, cash_flows).warnings
-            if i.check not in ("stub row",)  # the balance-sheet stub is already in bs_note
+            f"[{i.check}{' · ' + i.period if i.period else ''}] {i.message}"
+            for i in check_statements(income, balance_rows, cash_rows).warnings
+            # stub rows are already explained by bs_note / cf_note above
+            if i.check != "stub row"
         ],
     }
 

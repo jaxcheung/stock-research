@@ -33,8 +33,11 @@ from src.config import (
     BUSINESS_MODEL_OVERRIDES,
     DCF_TERMINAL_GROWTH_RATE,
     KIND_PEER_INDUSTRIES,
+    PEER_AGG_MEDIAN_GAP,
+    PEER_DOMINANCE_SHARE,
     PEER_EPS_TTM_DIVERGENCE,
     PEER_METHOD_BY_KIND,
+    PEER_PE_EPS_SWING,
     PEER_ROE_GAP_CAVEAT_PP,
     PEER_ROE_MIN_SPREAD,
     PEER_ROE_RANGE_TOLERANCE,
@@ -157,6 +160,10 @@ def _company_row(symbol: str, client: FMPClient) -> dict[str, Any] | None:
         "reportingCurrency": reporting,
         "kind": model.kind,
         "subtype": model.subtype,
+        # Adjacent industries tried only when the industry set is too thin (fallback, not default).
+        "relatedIndustries": list(
+            RELATED_INDUSTRIES.get(profile.get("industry") or "", {}).get("related", [])
+        ),
         "kindReason": model.reason,
         # Industries whose companies count as "industry" peers: its own, plus the industries
         # FMP spreads this business model across (config), plus an override's peer industry.
@@ -165,7 +172,6 @@ def _company_row(symbol: str, client: FMPClient) -> dict[str, Any] | None:
                 [profile.get("industry") or ""]
                 + list(BUSINESS_MODEL_OVERRIDES.get(symbol.upper(), {}).get("peer_industries", []))
                 + ([] if model.subtype in PLAIN_PB_SUBTYPES else KIND_PEER_INDUSTRIES.get(model.kind, []))
-                + RELATED_INDUSTRIES.get(profile.get("industry") or "", {}).get("related", [])
             )
         ),
         "captiveFinance": model.captive_finance,
@@ -841,6 +847,10 @@ def peer_valuation(
     def require(r: dict[str, Any]) -> str | None:
         if r.get(den) is None or r.get("marketCap") is None:
             return f"no {spec['den_label']}"
+        g_eps = r.get("epsGrowth")
+        lo_g, hi_g = PEER_PE_EPS_SWING
+        if method == "pe" and g_eps is not None and not lo_g <= g_eps <= hi_g:
+            return f"EPS {g_eps:+.0%} YoY — cyclical-peak or one-off earnings"
         if (
             method == "pb"
             and me.get("subtype") not in PLAIN_PB_SUBTYPES
@@ -849,14 +859,19 @@ def peer_valuation(
             return "loss-making / no TTM earnings"
         return None
 
-    for scope, pool, same_ind in (
-        ("Industry peers", ind_cands, True),
-        ("Sector peers (size-matched)", sec_cands, False),
-    ):
+    attempts: list[tuple[str, list[tuple[str, str]], bool, dict[str, Any]]] = [
+        ("Industry peers", ind_cands, True, me)
+    ]
+    if me.get("relatedIndustries"):
+        me_rel = dict(me, peerIndustries=list(dict.fromkeys(me["peerIndustries"] + me["relatedIndustries"])))
+        rel_cands = [c for c in _peer_candidates(symbol, me_rel, client) if c[1] != "sector, similar size"]
+        attempts.append(("Industry + related peers", rel_cands, True, me_rel))
+    attempts.append(("Sector peers (size-matched)", sec_cands, False, me))
+    for scope, pool, same_ind, row_used in attempts:
         skipped: list[str] = []
         df, fx = _select_peers(
             pool,
-            me,
+            row_used,
             client,
             max_peers,
             same_industry=same_ind,
@@ -867,8 +882,15 @@ def peer_valuation(
         pv.excluded_fx += fx
         if len(df) >= PEER_TARGET_MIN_PEERS:
             chosen, pv.scope = df, scope
-            if same_ind and "industry" in df and (df["industry"] != me.get("industry")).any():
-                pv.scope = "Industry + related peers"
+            if scope == "Industry + related peers" and "industry" in df:
+                own_n = int((df["industry"] == me.get("industry")).sum())
+                if own_n == 0:
+                    pv.scope = "Related industries only (none in own industry)"
+                    pv.reliable = False
+                    pv.notes.append(
+                        f"No peer from {symbol}'s own FMP industry survived — every peer comes from an adjacent "
+                        "industry, so the multiple compares different businesses; shown as indicative only."
+                    )
             if skipped:
                 pv.notes.append("Skipped during peer selection: " + ", ".join(skipped))
             break
@@ -886,6 +908,18 @@ def peer_valuation(
 
     pv.peers, pv.n = chosen.reset_index(drop=True), len(chosen)
     pv.peer_aggregate, pv.peer_median = _multiple_stats(chosen, den, method)
+    if pv.peer_aggregate and pv.peer_median and chosen["marketCap"].sum() > 0:
+        shares = chosen["marketCap"] / chosen["marketCap"].sum()
+        top_i = shares.idxmax()
+        top_sym, top_share = str(chosen.loc[top_i, "symbol"]), float(shares.max())
+        apart = abs(pv.peer_aggregate / pv.peer_median - 1)
+        if top_share > PEER_DOMINANCE_SHARE and apart > PEER_AGG_MEDIAN_GAP:
+            pv.reliable = False
+            pv.notes.append(
+                f"The aggregate is dominated by {top_sym} ({top_share:.0%} of peer market cap) and sits "
+                f"{apart:.0%} from the peer median ({pv.peer_aggregate:.2f}× vs {pv.peer_median:.2f}×) — it "
+                "mostly measures one company, so the peer-implied value is indicative only."
+            )
     if method == "pe" and pv.peer_aggregate is not None and pv.peer_aggregate > RELVAL_MAX_MEANINGFUL_PE:
         pv.notes.append(
             f"Peer aggregate P/E of {pv.peer_aggregate:,.0f}× (Σ earnings near zero — loss-makers offset "

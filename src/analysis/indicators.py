@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 
 from src.analysis import timeseries as ts
-from src.analysis.data_quality import DataQualityReport, check_statements
+from src.analysis.data_quality import DataQualityReport, check_statements, drop_stub_rows
 from src.config import (
     INDICATOR_HISTORY_YEARS,
     INDUSTRY_INDICATOR_PROFILES,
@@ -907,6 +907,7 @@ def load_company(
             rows = fetch(symbol, limit=years)
             if name in stmt_rows:
                 stmt_rows[name] = rows
+                rows = drop_stub_rows(rows, name)  # never compute indicators from a stub period
             parts.append(_frame(rows, prefix))
         except FMPError as exc:  # partial data: keep what we have
             logger.warning("%s: %s unavailable: %s", symbol, name, exc)
