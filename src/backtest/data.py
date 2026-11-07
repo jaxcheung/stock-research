@@ -37,10 +37,11 @@ WITH raw AS (
            revenue, grossProfit, operatingIncome, netIncome, weightedAverageShsOutDil AS shares
     FROM income_annual WHERE period = 'FY'
 ), r AS (
-    -- fullYear: the period ends 330-400 days after the previous FILED period (or is the first one).
-    -- A transition stub (ZWS Apr-Dec 2020, 275 days) is not a full year.
+    -- fullYear is False only for a part-year period: one ending < 330 days after the previous
+    -- FILED period (ZWS Apr-Dec 2020, 275 days). A longer gap means a missing predecessor in FMP,
+    -- not a short year (APC FY2022 after 1,461 days is a real 12-month year).
     SELECT *, coalesce(
-               periodEnd - lag(periodEnd) OVER (PARTITION BY symbol ORDER BY periodEnd) BETWEEN 330 AND 400,
+               periodEnd - lag(periodEnd) OVER (PARTITION BY symbol ORDER BY periodEnd) >= 330,
                TRUE) AS fullYear
     FROM raw
 ), i AS (

@@ -307,7 +307,8 @@ def _findings(rep: EvaluationReport, benchmark: str, trials: list[str], n_trials
         significant = p_oos < STATS_SIGNIFICANCE_LEVEL and _num(sel.get("alphaOOS")) > 0
         untestable = not np.isfinite(p_oos)
         verdict = (
-            f"the out-of-sample window is too short to test alpha (n < {BACKTEST_MIN_EVAL_MONTHS} months)."
+            "had a higher Sharpe out of sample, but the window is too short to test alpha "
+            f"(needs {BACKTEST_MIN_EVAL_MONTHS} months)."
             if untestable and oos_beats
             else "did NOT beat the benchmark out of sample."
             if not oos_beats
@@ -319,8 +320,15 @@ def _findings(rep: EvaluationReport, benchmark: str, trials: list[str], n_trials
         out.append(
             f"Walk-forward: picking the best in-sample strategy (**{sel['best']}**, Sharpe {_fmt(sel['sharpeIS'], '.2f')} "
             f"before {sel['splitAt']}) gave an out-of-sample Sharpe of {_fmt(sel['sharpeOOS'], '.2f')} vs the "
-            f"benchmark's {_fmt(sel['benchSharpeOOS'], '.2f')}; OOS alpha {_fmt(sel.get('alphaOOS'), '+.1%')}/yr "
-            f"(p = {_fmt(p_oos, '.2f')}, n = {sel.get('nOOS')} months) — it " + verdict
+            f"benchmark's {_fmt(sel['benchSharpeOOS'], '.2f')}; "
+            + (
+                f"OOS n = {sel.get('nOOS')} months"
+                if untestable
+                else f"OOS alpha {_fmt(sel.get('alphaOOS'), '+.1%')}/yr (p = {_fmt(p_oos, '.2f')}, "
+                f"n = {sel.get('nOOS')} months)"
+            )
+            + " — it "
+            + verdict
         )
     return out
 
