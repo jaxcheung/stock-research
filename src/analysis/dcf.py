@@ -14,7 +14,7 @@ from typing import Any
 from src.analysis.business_model import classify
 from src.config import (
     DCF_CAPTIVE_COD_GAP,
-    DCF_CAPTIVE_DEBT_WEIGHT,
+    DCF_DEBT_SPREAD,
     DCF_DERIVED_GROWTH_BOUNDS,
     DCF_MARKET_RISK_PREMIUM,
     DCF_MAX_DERIVED_COST_OF_DEBT,
@@ -131,9 +131,16 @@ def run_dcf(
     # For banks/lenders/insurers deposits and float ARE operations and loan-book growth
     # sits outside "FCF" (JPM came out at -$1,139/share, AXP's "cost of debt" was its
     # deposit rate); for REITs property acquisitions sit outside FCF (O +176%).
-    model = classify(profile, income[0])
+    model = classify(profile, income[0], balance_sheet[0], risk_free_rate=risk_free_rate)
+    if model.captive_finance:
+        raise ValueError(
+            f"{symbol}: consolidated statements include a captive-finance arm ({model.reason}) — its debt, "
+            "interest and receivables growth belong to a lending business, so an FCF-to-firm DCF of the "
+            "consolidated company is not meaningful without separating the finance segment"
+        )
     if model.kind != "standard":
         alternative = {
+            "broker_dealer": "P/B vs ROE, or a residual-income model",
             "bank": "P/B vs ROE, or a residual-income model",
             "lender": "P/B vs ROE, or a residual-income model",
             "insurer": "P/B, or a residual-income model",
@@ -197,10 +204,14 @@ def run_dcf(
 
     total_capital = market_cap + total_debt
     debt_weight = total_debt / total_capital
+    derived_cost_of_debt: float | None = None
+    cost_of_debt_floored = False
     if cost_of_debt is None:
         interest_expense = latest_income.get("interestExpense") or 0.0
         cost_of_debt = (
-            interest_expense / total_debt if interest_expense and total_debt else (risk_free_rate + 0.01)
+            interest_expense / total_debt
+            if interest_expense and total_debt
+            else (risk_free_rate + DCF_DEBT_SPREAD)
         )
         if cost_of_debt > DCF_MAX_DERIVED_COST_OF_DEBT:
             raise ValueError(
@@ -208,14 +219,17 @@ def run_dcf(
                 f"for an FCF-to-firm DCF (> {DCF_MAX_DERIVED_COST_OF_DEBT:.0%}) — typical of a lender whose "
                 "interest expense funds its loan book; DCF not meaningful"
             )
-        # Captive finance (Ford Credit, GM Financial): the arm's debt is in totalDebt but its
-        # interest is booked in cost of sales, and receivables growth never reaches FCF.
-        if cost_of_debt < risk_free_rate - DCF_CAPTIVE_COD_GAP and debt_weight > DCF_CAPTIVE_DEBT_WEIGHT:
-            raise ValueError(
-                f"{symbol}: derived cost of debt {cost_of_debt:.2%} is far below the risk-free rate "
-                f"({risk_free_rate:.2%}) while debt is {debt_weight:.0%} of capital — total debt likely includes "
-                "a captive-finance arm whose interest is booked outside interest expense; FCF-to-firm DCF "
-                "not meaningful without separating the finance business"
+        # A rate far below risk-free is a legacy fixed coupon (GOOGL 1.2%, XOM 1.4%), not the
+        # marginal cost of new borrowing that WACC needs — replace it, and disclose.
+        if cost_of_debt < risk_free_rate - DCF_CAPTIVE_COD_GAP:
+            derived_cost_of_debt = cost_of_debt
+            cost_of_debt = risk_free_rate + DCF_DEBT_SPREAD
+            cost_of_debt_floored = True
+            logger.info(
+                "%s: derived cost of debt %.2f%% replaced by risk-free + spread %.2f%%",
+                symbol,
+                derived_cost_of_debt * 100,
+                cost_of_debt * 100,
             )
 
     weight_equity = market_cap / total_capital
@@ -280,6 +294,8 @@ def run_dcf(
             "beta": beta,
             "costOfEquity": cost_of_equity,
             "costOfDebt": cost_of_debt,
+            "costOfDebtFloored": cost_of_debt_floored,
+            "derivedCostOfDebt": derived_cost_of_debt,
             "effectiveTaxRate": effective_tax_rate,
         },
         "wacc": wacc,

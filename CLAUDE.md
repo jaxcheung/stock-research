@@ -74,30 +74,41 @@ Built incrementally, starting cheap:
   (not implemented). Apply this same check to any new analysis that mixes
   price/market-cap with statement-derived per-share data.
 - **Value a business with methods that fit its model.** `business_model.classify`
-  (pure, no I/O) labels every company `standard` / `bank` / `lender` / `insurer` /
-  `asset_manager` / `reit` from the FMP industry plus, for Financial Services, gross
-  interest income ÷ revenue >= `LENDER_INTEREST_INCOME_SHARE` (10% — calibrated on the
-  local store: payments <= 2.1%, lenders >= 20%; FMP files V/MA and COF/SYF/AXP in the
-  same industry, so industry alone can't separate them). Consequences:
+  (pure, no I/O) labels every company `standard` / `bank` / `lender` / `broker_dealer` /
+  `insurer` (life | pc) / `asset_manager` / `reit`, plus a `captive_finance` flag. Order:
+  config overrides → strong keywords (REIT, Banks, Insurance) → gross interest income ÷
+  revenue (>= 10% lender; in Capital Markets/Asset Management 10–80% broker-dealer, >= 80%
+  lender/BDC) → unmapped-interest test (interest < 0.5% but receivables >= 40% of assets →
+  lender) → weak keywords → standard. Calibration and every override's reason live in
+  `config.py`; overrides are always disclosed in reports. Captive finance = receivables
+  >= 40% of assets, or cost of debt far below risk-free with debt > 50% of capital (a low
+  cost of debt alone is NOT a signal — GOOGL/XOM derive ~1.3% from legacy coupons).
+  Consequences:
   - `dcf.py` raises `ValueError` (→ "DCF unavailable: <reason>") for every non-`standard`
-    model, for captive-finance capital structures (derived cost of debt more than
-    `DCF_CAPTIVE_COD_GAP` below the risk-free rate with debt > `DCF_CAPTIVE_DEBT_WEIGHT`
-    of capital — Ford produced +2,142%), cost of debt > `DCF_MAX_DERIVED_COST_OF_DEBT`,
-    non-positive base FCF and non-positive equity value. Derived FCF growth is clamped
-    (`DCF_DERIVED_GROWTH_BOUNDS`). Output carries `terminalValueShare` (flag > 75%) and
-    `sanityBandBreach` (value outside `DCF_SANITY_BAND` × price).
+    model and for captive finance, cost of debt > `DCF_MAX_DERIVED_COST_OF_DEBT`,
+    non-positive base FCF and non-positive equity value. A derived cost of debt more than
+    `DCF_CAPTIVE_COD_GAP` below risk-free is replaced by risk-free + `DCF_DEBT_SPREAD`
+    (marginal, not historical, cost — disclosed). Derived FCF growth is clamped. Output
+    carries `terminalValueShare` and `sanityBandBreach` (outside `DCF_SANITY_BAND` × price).
   - Peer valuation (`relative_valuation.peer_valuation`) uses P/E (standard, asset
-    managers), ROE-adjusted P/B (banks, lenders, insurers: warranted P/B = peer P/B ×
-    (ROE_s − g)/(ROE_p − g)) or P/FFO (REITs); peers must share the subject's business
-    model and be operating equities (no preferreds/notes); one scope at a time with an
-    explicit sector fallback; Σ÷Σ aggregate + median; >= `PEER_TARGET_MIN_PEERS` or no
-    implied price.
-  - The report's price target blends only credible methods within
-    ±`TARGET_MAX_SINGLE_METHOD_GAP` of the price; others are shown with the reason. If
-    methods exist but none qualifies, the valuation verdict is **Indeterminate** — never
-    a verdict built on a number already known not to be credible.
-  - Scorecard: financials are scored on equity ÷ assets (not current ratio / D/E /
-    coverage); negative equity makes D/E and ROE "n/m" and adds a risk line.
+    managers), ROE-adjusted P/B (bank / lender / broker-dealer / insurer: warranted P/B =
+    peer P/B × (ROE_s − g)/(ROE_p − g); loss-making peers excluded from the P/B and ROE
+    aggregates; peer ROE must exceed g by `PEER_ROE_MIN_SPREAD` and the factor must fall in
+    `PEER_ROE_ADJ_BOUNDS`, else "unreliable") or P/FFO (REITs). Peers share the subject's
+    business model and are operating equities; one scope at a time; Σ÷Σ + median; >=
+    `PEER_TARGET_MIN_PEERS` or no implied price.
+  - **`valuation_summary.summarize_valuation` is the single rule** for which methods count
+    and what the valuation verdict is; the report's price target AND the scorecard's
+    valuation signal both use it (they disagreed before). Credible methods within
+    ±`TARGET_MAX_SINGLE_METHOD_GAP` are blended into a target; if all credible methods are
+    beyond it and agree in direction, the verdict is "<Rich|Attractive> — low precision"
+    with an indicative range and a risk line; credible methods that disagree →
+    "Indeterminate — methods disagree"; only non-credible methods → "Indeterminate — no
+    credible method".
+  - Scorecard: banks/lenders/broker-dealers are scored on equity ÷ assets; insurers'
+    financial health is not scored (separate-account assets make equity/assets meaningless;
+    RBC/combined ratio unavailable); negative equity makes D/E and ROE "n/m"; captive
+    finance makes D/E and interest coverage "n/m". Each adds an explicit risk line.
 - **Secrets never reach logs.** `get_logger` uses a redacting formatter
   (`apikey=`/`api_key=`/`token=` values → `***`), and client errors re-raise
   `from None` so the raw requests exception (URL incl. key) isn't chained.
@@ -237,8 +248,12 @@ scripts like `~/bedrock_setup.sh` are outside the project and the repo).
   `load_company` → `CompanyData` (10y annual indicator history, TTM valuation, price return/risk incl.
   HAC beta vs SPY). Industry profiles (`config.INDUSTRY_INDICATOR_PROFILES`) pick default and
   not-meaningful indicators per industry (banks, insurance, REITs, software, semis, retail, energy, utilities).
-- `src/analysis/business_model.py` — `classify(profile, income)` → `BusinessModel(kind, reason)`;
-  drives DCF applicability, peer method, peer matching and scorecard health metrics.
+- `src/analysis/business_model.py` — `classify(profile, income, balance, risk_free_rate)` →
+  `BusinessModel(kind, reason, captive_finance, subtype, override)`; drives DCF applicability,
+  peer method, peer matching and scorecard health metrics.
+- `src/analysis/valuation_summary.py` — `summarize_valuation(price, dcf, peer)` →
+  `ValuationSummary`: method eligibility, blended / low-precision / indeterminate verdict,
+  divergence; shared by `research_report` and `investment_score`.
 - `src/analysis/industry_analysis.py` — `run_industry_comparison(symbol, PeerFilters)` → `IndustryComparisonReport`: one peer scope at a time
   (industry → explicit sector fallback when < 3 peers; never blended), cap-size / similar-size / US-only
   filters, ex-subject peer median / mean (non-multiples) / Σ÷Σ aggregate in the peer group's main

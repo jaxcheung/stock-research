@@ -19,7 +19,8 @@ from src.analysis.investment_score import compute_investment_score
 from src.analysis.macro_analysis import get_macro_backdrop
 from src.analysis.relative_valuation import PeerValuation, peer_valuation
 from src.analysis.stock_analysis import analyze_stock
-from src.config import DCF_SANITY_BAND, DEFAULT_MAX_PEERS, TARGET_MAX_SINGLE_METHOD_GAP
+from src.analysis.valuation_summary import ValuationSummary, summarize_valuation
+from src.config import DEFAULT_MAX_PEERS
 from src.data.fmp_client import FMPClient, FMPError
 from src.data.fred_client import FREDError
 from src.reporting.formatting import money
@@ -77,73 +78,18 @@ def generate_research_report(
     }
 
 
-def _price_target(report: dict[str, Any]) -> dict[str, Any]:
-    """Blend the valuation methods that are individually credible; show the rest.
-
-    A method enters the blended target only if it is (a) not flagged unreliable by its
-    own engine (DCF outside the 0.2x-5x sanity band, P/B without an ROE adjustment) and
-    (b) within ±TARGET_MAX_SINGLE_METHOD_GAP of the price. Excluded methods are shown
-    with the reason — never silently averaged in (Ford's +2,142% DCF was). If methods
-    exist but none qualifies, the valuation is "Indeterminate" rather than a verdict
-    built on a number we already know is not credible.
-    """
-    price = report["stock"]["price"]
-    dcf, pv = report["dcf"], report.get("peerValuation")
-    lo, hi = DCF_SANITY_BAND
-    candidates: list[dict[str, Any]] = []
-    if dcf:
-        reason = f"outside the {lo:g}×–{hi:g}× price sanity band" if dcf.get("sanityBandBreach") else None
-        candidates.append({"name": "DCF", "value": dcf["intrinsicValuePerShare"], "excluded": reason})
-    if pv is not None and pv.implied_price is not None:
-        reason = None if pv.reliable else "rests on an unadjusted multiple (see peer notes)"
-        candidates.append({"name": f"Peer {pv.method_label}", "value": pv.implied_price, "excluded": reason})
-    for c in candidates:
-        if c["excluded"] is None and price:
-            gap = c["value"] / price - 1
-            if abs(gap) > TARGET_MAX_SINGLE_METHOD_GAP:
-                c["excluded"] = (
-                    f"{gap:+.0%} from the price (beyond ±{TARGET_MAX_SINGLE_METHOD_GAP:.0%}) — shown, not blended"
-                )
-
-    used = [c for c in candidates if c["excluded"] is None]
-    blended = sum(c["value"] for c in used) / len(used) if used else None
-    if len(used) == 2:
-        method = "blended: average of DCF and peer-multiple"
-    elif len(used) == 1:
-        method = f"{used[0]['name']} only"
-    else:
-        method = "unavailable"
-    vals = [c["value"] for c in used]
-    divergent = len(vals) == 2 and abs(vals[0] - vals[1]) / max(vals) > 0.30
-    return {
-        "dcf": dcf["intrinsicValuePerShare"] if dcf else None,
-        "peerImplied": pv.implied_price if pv is not None else None,
-        "blended": blended,
-        "method": method,
-        "divergent": divergent,
-        "candidates": candidates,
-        "indeterminate": bool(candidates) and not used,
-    }
+def _price_target(report: dict[str, Any]) -> ValuationSummary:
+    """Which valuation methods count and the resulting target / verdict — delegated to
+    valuation_summary so the scorecard's valuation signal uses the identical rule."""
+    return summarize_valuation(report["stock"]["price"], report["dcf"], report.get("peerValuation"))
 
 
-def _valuation_verdict(target: dict[str, Any], current_price: float | None) -> tuple[str, float | None]:
-    """Valuation-only verdict derived strictly from target-vs-price upside —
-    deliberately separate from the composite "rating" (which blends quality,
-    growth, financial health, and momentum). A high-quality business can
-    legitimately be "Rich" on valuation and vice versa; collapsing both into
-    one label is how you end up with a nonsensical "Buy, -36% target".
-    """
-    if target.get("indeterminate"):
-        return "Indeterminate (methods not credible or disagree)", None
-    blended_target = target.get("blended")
-    if blended_target is None or not current_price:
-        return "n/a", None
-    upside = (blended_target - current_price) / current_price
-    if upside >= 0.15:
-        return "Attractive (undervalued)", upside
-    if upside >= -0.10:
-        return "Fair value", upside
-    return "Rich (overvalued)", upside
+def _valuation_verdict(target: ValuationSummary, current_price: float | None) -> tuple[str, float | None]:
+    """Valuation-only verdict — deliberately separate from the composite "rating" (which
+    blends quality, growth, financial health, and momentum). A high-quality business can
+    legitimately be "Rich" on valuation and vice versa; collapsing both into one label is
+    how you end up with a nonsensical "Buy, -36% target"."""
+    return target.verdict, target.upside
 
 
 def _reconcile(rating: str, valuation_verdict: str) -> str:
@@ -204,6 +150,11 @@ def _peer_section(report: dict[str, Any]) -> list[str]:
     return out
 
 
+def _fmt_range(r: tuple[float, float]) -> str:
+    lo_v, hi_v = r
+    return f"${lo_v:.2f}" if abs(hi_v - lo_v) < 0.005 else f"${lo_v:.2f}–${hi_v:.2f}"
+
+
 def _identify_risks(report: dict[str, Any]) -> list[str]:
     risks = []
     stock = report["stock"]
@@ -224,13 +175,21 @@ def _identify_risks(report: dict[str, Any]) -> list[str]:
             "buybacks/dividends funded with debt; debt/equity and ROE are not meaningful, and the balance "
             "sheet has no equity cushion."
         )
-    if stock.get("businessModel", "standard") in FINANCIAL_KINDS:
-        # Current ratio and D/E are meaningless for deposit-/float-funded balance sheets.
+    kind = stock.get("businessModel", "standard")
+    if kind in FINANCIAL_KINDS:
+        # Current ratio and D/E are meaningless for deposit-/float-funded balance sheets;
+        # equity/assets is meaningless for insurers (separate-account assets).
         eta = leverage.get("equityToAssets")
-        if eta is not None and eta < 0.08:
+        if kind != "insurer" and eta is not None and eta < 0.08:
             risks.append(f"Thin capital base: equity is {eta:.1%} of total assets.")
     else:
-        if leverage["debtToEquityRatio"] is not None and leverage["debtToEquityRatio"] > 1.0:
+        if stock.get("captiveFinance"):
+            risks.append(
+                "Consolidated statements include a captive-finance arm: reported debt, debt/equity and "
+                "interest coverage mix the lending business with the operating company — judge leverage "
+                "on the industrial segment (not separated in FMP data)."
+            )
+        elif leverage["debtToEquityRatio"] is not None and leverage["debtToEquityRatio"] > 1.0:
             risks.append(f"Elevated leverage: debt/equity of {leverage['debtToEquityRatio']:.2f}.")
         if leverage["currentRatio"] is not None and leverage["currentRatio"] < 1.0:
             risks.append(f"Liquidity risk: current ratio of {leverage['currentRatio']:.2f} is below 1.0x.")
@@ -244,10 +203,20 @@ def _identify_risks(report: dict[str, Any]) -> list[str]:
         risks.append("Currently unprofitable (negative net margin).")
 
     dcf = report["dcf"]
-    if dcf and not dcf.get("sanityBandBreach") and dcf["upsidePct"] is not None and dcf["upsidePct"] < -0.25:
+    summary = _price_target(report)
+    dcf_used = any(m.name == "DCF" for m in summary.used)
+    if dcf and dcf_used and dcf["upsidePct"] is not None and dcf["upsidePct"] < -0.25:
+        premium = dcf["currentPrice"] / dcf["intrinsicValuePerShare"] - 1
         risks.append(
-            f"Trades {abs(dcf['upsidePct']):.0%} above DCF intrinsic value — "
-            "meaningful valuation risk if growth/margin assumptions disappoint."
+            f"Price is {premium:.0%} above DCF intrinsic value (intrinsic value {abs(dcf['upsidePct']):.0%} "
+            "below the price) — meaningful valuation risk if growth/margin assumptions disappoint."
+        )
+    if summary.precision == "low" and summary.target_range and summary.verdict.startswith("Rich"):
+        lo_v, hi_v = summary.target_range
+        risks.append(
+            f"Valuation risk: every credible method values the stock more than 50% below the price "
+            f"({_fmt_range((lo_v, hi_v))} vs ${stock['price']:.2f}) — the price embeds expectations well beyond "
+            "what DCF or peer multiples support."
         )
 
     if report["macro"] and report["macro"]["yieldCurveInverted"]:
@@ -264,7 +233,7 @@ def _identify_risks(report: dict[str, Any]) -> list[str]:
     return risks
 
 
-def _executive_summary(report: dict[str, Any], target: dict[str, Any], valuation_verdict: str) -> list[str]:
+def _executive_summary(report: dict[str, Any], target: ValuationSummary, valuation_verdict: str) -> list[str]:
     stock, score = report["stock"], report["score"]
     bullets = [f"**Fundamental quality: {score['rating']}** — composite score {score['compositeScore']}/100."]
     bullets.append(
@@ -288,19 +257,23 @@ def _executive_summary(report: dict[str, Any], target: dict[str, Any], valuation
         bullets.append(f"Strongest factor: **{best_name}** ({best['score']}/100) — {best['rationale']}")
         bullets.append(f"Weakest factor: **{worst_name}** ({worst['score']}/100) — {worst['rationale']}")
 
-    if target["blended"] is not None and stock["price"]:
-        upside = (target["blended"] - stock["price"]) / stock["price"]
-        direction = "upside" if upside >= 0 else "downside"
+    if target.target is not None and target.upside is not None and stock["price"]:
+        direction = "upside" if target.upside >= 0 else "downside"
         bullets.append(
-            f"Price target ${target['blended']:.2f} ({target['method']}) implies {abs(upside):.1%} "
+            f"Price target ${target.target:.2f} ({target.method_text}) implies {abs(target.upside):.1%} "
             f"{direction} from the current ${stock['price']:.2f}."
         )
-
-    if target["divergent"]:
+    elif target.target_range is not None:
+        lo_v, hi_v = target.target_range
         bullets.append(
-            f"⚠️ DCF (${target['dcf']:.2f}) and peer-multiple (${target['peerImplied']:.2f}) valuations "
-            "diverge significantly — the market may be pricing in growth/quality the DCF's assumptions "
-            "don't fully capture, or the stock is richly valued relative to fundamentals. See Valuation section."
+            f"No point target: {target.method_text} ({_fmt_range((lo_v, hi_v))} vs ${stock['price']:.2f})."
+        )
+
+    if target.divergent and target.divergence_note:
+        bullets.append(
+            f"⚠️ Valuation methods diverge ({target.divergence_note}) — the market may be pricing in "
+            "growth/quality one method doesn't capture, or the stock is richly valued relative to "
+            "fundamentals. See Valuation section."
         )
 
     return bullets
@@ -326,9 +299,13 @@ def render_research_report(
         f"**Fundamental Quality: {score['rating']}** ({score['compositeScore']}/100)  |  "
         f"**Valuation: {valuation_verdict}**  |  Price: ${stock['price']:.2f}"
         + (
-            f"  |  Target: ${target['blended']:.2f} ({target['method']})"
-            if target["blended"] is not None
-            else ""
+            f"  |  Target: ${target.target:.2f} ({target.method_text})"
+            if target.target is not None
+            else (
+                f"  |  Indicative: {_fmt_range(target.target_range)} (low precision)"
+                if target.target_range is not None
+                else ""
+            )
         )
     )
     lines.append("")
@@ -339,6 +316,11 @@ def render_research_report(
 
     lines.append("## Company Overview")
     lines.append(f"- Sector: {stock['sector']} / {stock['industry']}")
+    lines.append(
+        f"- Business model: {stock.get('businessModel', 'standard').replace('_', ' ')}"
+        + (" with captive finance" if stock.get("captiveFinance") else "")
+        + f" ({stock.get('businessModelReason', '')})"
+    )
     if stock["marketCap"]:
         lines.append(f"- Market cap: {money(stock['marketCap'], stock.get('quoteCurrency'))}")
     if stock["currencyMismatch"]:
@@ -407,6 +389,12 @@ def render_research_report(
                     else ""
                 )
             )
+        if dcf["assumptions"].get("costOfDebtFloored"):
+            lines.append(
+                f"- Cost of debt {dcf['assumptions']['costOfDebt']:.2%} = risk-free + spread: the derived "
+                f"{dcf['assumptions']['derivedCostOfDebt']:.2%} (interest ÷ debt) reflects legacy coupons, "
+                "not the marginal cost of borrowing"
+            )
         if dcf.get("sanityBandBreach"):
             lines.append("- ⚠️ Outside the 0.2×–5× price sanity band — shown, not used in the price target")
     else:
@@ -443,34 +431,46 @@ def render_research_report(
         f"**Fundamental quality: {score['rating']}** ({score['compositeScore']}/100) — reflects quality, "
         "growth, financial health, and price momentum. This is a view on the business, not the entry price."
     )
-    for c in target["candidates"]:
-        status = f"excluded — {c['excluded']}" if c["excluded"] else "used"
-        lines.append(f"- {c['name']}: ${c['value']:.2f} ({status})")
-    if target["indeterminate"]:
-        lines.append(
-            "**Valuation: Indeterminate** — every available method is either flagged as not credible for this "
-            "company or sits beyond ±50% of the price, so no price target is published. Read the individual "
-            "methods above as ranges to investigate, not as a verdict."
+    for m in target.methods:
+        reason = f"not used — {m.reason}" if m.reason else "not used"
+        status = (
+            "used" + (f" ({m.reason}, low precision)" if m.reason else "") if m in target.used else reason
         )
-    elif target["blended"] is not None:
-        upside = (target["blended"] - stock["price"]) / stock["price"]
+        up = f", {m.upside:+.0%}" if m.upside is not None else ""
+        lines.append(f"- {m.name}: ${m.value:.2f}{up} ({status})")
+    if target.target is not None and target.upside is not None:
         lines.append(
-            f"**Valuation: {valuation_verdict}** — blended price target **${target['blended']:.2f}** "
-            f"({target['method']}), implying {upside:+.1%} vs the current price of ${stock['price']:.2f}."
+            f"**Valuation: {valuation_verdict}** — price target **${target.target:.2f}** "
+            f"({target.method_text}), implying {target.upside:+.1%} vs the current price of ${stock['price']:.2f}."
         )
-        if target["divergent"]:
-            lines.append(
-                "- DCF and peer-multiple methodologies disagree meaningfully here — the market may be "
-                "pricing in growth/quality the DCF's conservative assumptions don't capture, or the stock "
-                "is priced for perfection relative to fundamentals. Worth forming your own view on which "
-                "better fits this business before acting on either number alone."
+    elif target.precision == "low" and target.target_range is not None:
+        lo_v, hi_v = target.target_range
+        lines.append(
+            f"**Valuation: {valuation_verdict}** — {target.method_text}: {_fmt_range((lo_v, hi_v))} vs "
+            f"${stock['price']:.2f}. The direction is consistent across methods; the magnitude is not "
+            "precise enough for a point target."
+        )
+    elif target.indeterminate:
+        lines.append(
+            f"**Valuation: {valuation_verdict}** — "
+            + (
+                "the credible methods point in different directions, so no verdict or target is published."
+                if target.verdict.endswith("disagree")
+                else "every available method is flagged as not credible for this company (reasons above)."
             )
+        )
+    else:
+        lines.append("**Valuation: n/a** — no valuation method is available (see the Valuation section).")
+    if target.divergent and target.divergence_note:
+        lines.append(
+            f"- Methods diverge ({target.divergence_note}) — form your own view on which better fits "
+            "this business before acting on either number alone."
+        )
+    if target.precision != "none":
         lines.append(
             f"\n**Bottom line:** {stock['companyName']} is a {score['rating'].lower()}-quality business "
             f"({score['compositeScore']}/100) trading at a valuation assessed as {valuation_verdict.lower()}. "
             + _reconcile(score["rating"], valuation_verdict)
         )
-    else:
-        lines.append("**Valuation: n/a** — no reliable price target available (see Key Risks for why).")
 
     return "\n".join(lines)

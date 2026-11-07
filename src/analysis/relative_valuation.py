@@ -31,7 +31,9 @@ from src.config import (
     DCF_TERMINAL_GROWTH_RATE,
     PEER_EPS_TTM_DIVERGENCE,
     PEER_METHOD_BY_KIND,
+    PEER_ROE_ADJ_BOUNDS,
     PEER_ROE_GAP_CAVEAT_PP,
+    PEER_ROE_MIN_SPREAD,
     PEER_TARGET_MIN_PEERS,
     RELVAL_HISTORY_YEARS,
     RELVAL_MARKET_PROXY_MIN_CAP,
@@ -98,6 +100,11 @@ def _company_row(symbol: str, client: FMPClient) -> dict[str, Any] | None:
     except (FMPError, ValueError) as exc:
         logger.warning("Skipping %s: %s", symbol, exc)
         return None
+    try:  # balance sheet only sharpens the business-model test (unmapped-interest lenders)
+        bal = client.get_balance_sheet(symbol, limit=1)
+    except FMPError as exc:
+        logger.warning("%s: balance sheet unavailable for classification: %s", symbol, exc)
+        bal = []
     if not profile:
         return None
     reporting = inc[0].get("reportedCurrency") if inc else None
@@ -105,7 +112,7 @@ def _company_row(symbol: str, client: FMPClient) -> dict[str, Any] | None:
     mismatch = bool(quote_ccy and reporting and quote_ccy != reporting)
     pe = None if mismatch else ttm.get("priceToEarningsRatioTTM")
     mcap = profile.get("marketCap")
-    model = classify(profile, inc[0] if inc else None)
+    model = classify(profile, inc[0] if inc else None, bal[0] if bal else None)
     pb = None if mismatch else ttm.get("priceToBookRatioTTM")
     latest = inc[0] if inc else {}
     ni_fy, da_fy = latest.get("netIncome"), latest.get("depreciationAndAmortization")
@@ -135,6 +142,7 @@ def _company_row(symbol: str, client: FMPClient) -> dict[str, Any] | None:
         "reportingCurrency": reporting,
         "kind": model.kind,
         "kindReason": model.reason,
+        "captiveFinance": model.captive_finance,
         "pb": pb,
         # Book value implied by cap / P/B (TTM); FFO and FY net income in reporting currency.
         "book": (mcap / pb) if (mcap and pb and pb > 0) else None,
@@ -711,10 +719,20 @@ class PeerValuation:
     reliable: bool = True
 
 
-def _usable(df: pd.DataFrame, den: str) -> pd.DataFrame:
+def _usable(df: pd.DataFrame, den: str, method: str) -> tuple[pd.DataFrame, list[str]]:
+    """Peers usable for the method, plus symbols dropped as loss-making (P/B only).
+
+    For P/B a loss-making peer distorts both aggregates the ROE adjustment rests on — one
+    crypto-treasury company's mark-to-market loss moved SCHW from +5% to +74%."""
     if df.empty or den not in df.columns:
-        return pd.DataFrame()
-    return df.dropna(subset=["marketCap", den])
+        return pd.DataFrame(), []
+    usable = df.dropna(subset=["marketCap", den])
+    dropped: list[str] = []
+    if method == "pb":
+        loss = usable["earnings"].isna() | (usable["earnings"] <= 0)
+        dropped = [str(x) for x in usable.loc[loss, "symbol"]]
+        usable = usable[~loss]
+    return usable, dropped
 
 
 def _multiple_stats(df: pd.DataFrame, den: str, method: str) -> tuple[float | None, float | None]:
@@ -765,9 +783,14 @@ def peer_valuation(
             pool, me, client, max_peers, same_industry=same_ind, excluded_model=pv.excluded_model
         )
         pv.excluded_fx += fx
-        usable = _usable(df, den)
+        usable, loss_makers = _usable(df, den, method)
         if len(usable) >= PEER_TARGET_MIN_PEERS:
             chosen, pv.scope = usable, scope
+            if loss_makers:
+                pv.notes.append(
+                    "Excluded from the P/B and ROE aggregates as loss-making or without TTM earnings: "
+                    + ", ".join(loss_makers)
+                )
             break
         pv.notes.append(
             f"{scope}: only {len(usable)} usable peer(s) with {spec['den_label']} "
@@ -798,7 +821,16 @@ def peer_valuation(
         pv.peer_roe = float(with_e["earnings"].sum()) / tb if tb > 0 else None
         g = DCF_TERMINAL_GROWTH_RATE
         sr, pr = pv.subject_roe, pv.peer_roe
-        if sr is not None and pr is not None and sr > g and pr > g:
+        lo_adj, hi_adj = PEER_ROE_ADJ_BOUNDS
+        factor = (sr - g) / (pr - g) if sr is not None and pr is not None and pr - g > 0 else None
+        if (
+            sr is not None
+            and pr is not None
+            and factor is not None
+            and sr > g
+            and pr - g >= PEER_ROE_MIN_SPREAD
+            and lo_adj <= factor <= hi_adj
+        ):
             # Gordon justified P/B = (ROE - g) / (r - g); relative to peers the cost of equity
             # cancels, so the subject's warranted P/B = peer P/B x (ROE_s - g) / (ROE_p - g).
             pv.roe_adjustment = (sr - g) / (pr - g)
@@ -810,9 +842,18 @@ def peer_valuation(
             )
         else:
             pv.reliable = False
+            why = (
+                "subject or peer ROE unavailable"
+                if sr is None or pr is None
+                else f"peer ROE {pr:.1%} is less than {PEER_ROE_MIN_SPREAD:.0%} above long-run growth {g:.1%}"
+                if pr - g < PEER_ROE_MIN_SPREAD
+                else f"subject ROE {sr:.1%} is below long-run growth"
+                if sr <= g
+                else f"adjustment factor {factor:.2f}× is outside {lo_adj:g}×–{hi_adj:g}×"
+            )
             pv.notes.append(
-                "P/B not ROE-adjusted (subject or peer ROE missing or below long-run growth) — the plain P/B "
-                "re-rating is shown for reference only."
+                f"P/B not ROE-adjusted ({why}) — the plain P/B re-rating is shown for reference only "
+                "and is not used in the price target or the valuation signal."
             )
             if sr is not None and pr is not None and abs(sr - pr) * 100 > PEER_ROE_GAP_CAVEAT_PP:
                 pv.notes.append(

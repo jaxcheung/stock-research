@@ -3,6 +3,7 @@
 from typing import Any
 
 from src.analysis.business_model import classify
+from src.analysis.dcf import live_risk_free_rate
 from src.data.fmp_client import FMPClient, FMPError
 from src.utils.logging import get_logger
 
@@ -56,7 +57,7 @@ def analyze_stock(symbol: str, client: FMPClient | None = None, years: int = 5) 
             reporting_currency,
         )
 
-    model = classify(profile, latest_income)
+    model = classify(profile, latest_income, latest_bs or None, risk_free_rate=live_risk_free_rate()[0])
     total_equity = latest_bs.get("totalStockholdersEquity")
     total_assets = latest_bs.get("totalAssets")
     equity_to_assets = total_equity / total_assets if total_equity is not None and total_assets else None
@@ -78,6 +79,8 @@ def analyze_stock(symbol: str, client: FMPClient | None = None, years: int = 5) 
         "currencyMismatch": currency_mismatch,
         "businessModel": model.kind,
         "businessModelReason": model.reason,
+        "captiveFinance": model.captive_finance,
+        "businessModelOverride": model.override,
         "valuation": {
             "peRatio": None if currency_mismatch else latest_ratios.get("priceToEarningsRatio"),
             "pbRatio": None if currency_mismatch else latest_ratios.get("priceToBookRatio"),

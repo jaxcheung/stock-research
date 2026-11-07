@@ -18,6 +18,7 @@ from src.analysis.business_model import FINANCIAL_KINDS
 from src.analysis.dcf import run_dcf
 from src.analysis.relative_valuation import PeerValuation, peer_valuation
 from src.analysis.stock_analysis import analyze_stock
+from src.analysis.valuation_summary import summarize_valuation
 from src.config import DEFAULT_MAX_PEERS, EQUITY_TO_ASSETS_BANDS, SCORE_RATING_BANDS, SCORE_WEIGHTS
 from src.data.fmp_client import FMPClient, FMPError
 from src.utils.logging import get_logger
@@ -57,38 +58,27 @@ def _band_score_lower_better(value: float | None, bands: list[tuple[float, int]]
 def _score_valuation(
     stock: dict[str, Any], dcf_result: dict[str, Any] | None, peer_val: PeerValuation | None
 ) -> dict[str, Any]:
+    """Valuation signal from exactly the methods behind the report's valuation verdict
+    (valuation_summary) — a method the price target excludes is never scored."""
+    summary = summarize_valuation(stock.get("price"), dcf_result, peer_val)
+    detail: dict[str, Any] = {"verdict": summary.verdict, "precision": summary.precision}
     sub_scores = []
-    detail: dict[str, Any] = {}
     notes = []
-
-    if dcf_result and dcf_result.get("upsidePct") is not None:
-        upside = dcf_result["upsidePct"]
-        detail["dcfUpsidePct"] = upside
-        direction = "upside" if upside >= 0 else "downside"
-        if dcf_result.get("sanityBandBreach"):
-            notes.append(f"DCF implies {abs(upside):.0%} {direction} — outside the sanity band, not scored")
+    for m in summary.methods:
+        if m.upside is None:
+            continue
+        detail[f"{m.name} upside"] = m.upside
+        direction = "upside" if m.upside >= 0 else "downside"
+        text = f"{m.name} implies {abs(m.upside):.0%} {direction}"
+        if m in summary.used:
+            sub_scores.append(_band_score_higher_better(m.upside, _UPSIDE_BANDS))
+            notes.append(text + (" (low precision)" if summary.precision == "low" else ""))
         else:
-            sub_scores.append(_band_score_higher_better(upside, _UPSIDE_BANDS))
-            notes.append(f"DCF implies {abs(upside):.0%} {direction} to intrinsic value")
-
-    price = stock.get("price")
-    if peer_val is not None and peer_val.implied_price is not None and price:
-        upside = peer_val.implied_price / price - 1
-        detail["peerImpliedUpsidePct"] = upside
-        detail["peerMethod"] = peer_val.method_label
-        detail["peerCount"] = peer_val.n
-        direction = "upside" if upside >= 0 else "downside"
-        text = (
-            f"{peer_val.method_label} vs {peer_val.scope or 'peers'} (n={peer_val.n}) implies "
-            f"{abs(upside):.0%} {direction}"
-        )
-        if peer_val.reliable:
-            sub_scores.append(_band_score_higher_better(upside, _UPSIDE_BANDS))
-            notes.append(text)
-        else:
-            notes.append(text + " — unadjusted multiple, not scored")
-    elif peer_val is not None and peer_val.unavailable_reason:
+            notes.append(f"{text} — not scored ({m.reason})")
+    if peer_val is not None and peer_val.implied_price is None and peer_val.unavailable_reason:
         notes.append(f"No peer valuation: {peer_val.unavailable_reason}")
+    if summary.indeterminate:
+        notes.append(summary.verdict)
 
     valid_scores = [s for s in sub_scores if s is not None]
     score = round(sum(valid_scores) / len(valid_scores)) if valid_scores else None
@@ -134,6 +124,15 @@ def _score_growth(stock: dict[str, Any]) -> dict[str, Any]:
 
 def _score_financial_health(stock: dict[str, Any]) -> dict[str, Any]:
     leverage = stock["leverage"]
+    if stock.get("businessModel") == "insurer":
+        # Life insurers' total assets include separate-account (policyholder) assets, so
+        # equity/assets is structurally low and says nothing about solvency (MET 3.8%).
+        # The right metrics (RBC ratio, combined ratio) aren't available on FMP Starter.
+        return {
+            "score": None,
+            "rationale": "not scored for insurers — solvency metrics (RBC ratio, combined ratio) unavailable",
+            "detail": leverage,
+        }
     if stock.get("businessModel", "standard") in FINANCIAL_KINDS:
         # Deposit-/float-funded: current ratio, D/E and interest coverage are meaningless
         # (JPM scored 7/100 on them). Capital adequacy proxy: equity / total assets.
@@ -150,6 +149,7 @@ def _score_financial_health(stock: dict[str, Any]) -> dict[str, Any]:
         }
     equity = leverage.get("totalEquity")
     negative_equity = equity is not None and equity <= 0
+    captive = bool(stock.get("captiveFinance"))
     interest_coverage = leverage["interestCoverageRatio"]
     # FMP reports exactly 0.0 (not null) when a company's interestExpense is
     # itself reported as 0 (e.g. Apple nets interest income/expense) — that's
@@ -159,14 +159,16 @@ def _score_financial_health(stock: dict[str, Any]) -> dict[str, Any]:
 
     current_ratio_score = _band_score_lower_better(leverage["currentRatio"], _CURRENT_RATIO_FLOOR_BANDS)
     # Negative D/E (negative equity) must not land in the "lowest leverage" band (MCD scored 100).
+    # Negative equity or a captive finance arm (Ford Credit's debt in consolidated D/E) makes
+    # D/E not meaningful for the operating business.
     debt_equity_score = (
         None
-        if negative_equity
+        if negative_equity or captive
         else _band_score_lower_better(leverage["debtToEquityRatio"], _DEBT_TO_EQUITY_BANDS)
     )
     coverage_score = (
         None
-        if coverage_unreliable
+        if coverage_unreliable or captive
         else _band_score_higher_better(interest_coverage, _INTEREST_COVERAGE_BANDS)
     )
 
@@ -178,9 +180,13 @@ def _score_financial_health(stock: dict[str, Any]) -> dict[str, Any]:
         notes.append(f"current ratio {leverage['currentRatio']:.2f}")
     if negative_equity:
         notes.append("debt/equity n/m (negative equity)")
+    elif captive:
+        notes.append("debt/equity n/m (includes captive-finance debt)")
     elif leverage["debtToEquityRatio"] is not None:
         notes.append(f"debt/equity {leverage['debtToEquityRatio']:.2f}")
-    if coverage_unreliable:
+    if captive:
+        notes.append("interest coverage n/m (finance-arm interest booked in cost of sales)")
+    elif coverage_unreliable:
         notes.append("interest coverage data unreliable (near-zero reported interest expense)")
     elif interest_coverage is not None:
         notes.append(f"interest coverage {interest_coverage:.1f}x")

@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -33,30 +34,70 @@ DCF_MAX_DERIVED_COST_OF_DEBT = 0.15
 # debt is more than this share of (debt + market cap) means total debt includes a finance
 # arm whose interest sits in cost of sales (Ford 0.75%, GM 0.56% at ~75%/63% debt weight).
 DCF_CAPTIVE_COD_GAP = 0.02
+# A derived cost of debt this far below the risk-free rate is a legacy coupon, not the
+# marginal cost of borrowing: it is replaced by risk-free + DCF_DEBT_SPREAD (disclosed).
+DCF_DEBT_SPREAD = 0.01
 DCF_CAPTIVE_DEBT_WEIGHT = 0.50
 # Intrinsic value / price outside this band is reported but never blended into a target.
 DCF_SANITY_BAND = (0.2, 5.0)
 # Terminal value above this share of EV is flagged (the answer is mostly the TV assumption).
 DCF_TV_SHARE_FLAG = 0.75
 
-# Business-model classification (src/analysis/business_model.py). Matched as substrings
-# of the FMP industry name, first match wins (order matters: "REIT - Mortgage" is a lender).
-BUSINESS_MODEL_INDUSTRY_KEYWORDS: list[tuple[str, str]] = [
+# Business-model classification (src/analysis/business_model.py). Order of tests:
+# overrides -> REIT / bank / insurer keywords -> interest-income share -> unmapped-
+# interest balance-sheet test -> weaker keywords -> standard. Keywords are substrings
+# of the FMP industry name; first match wins ("REIT - Mortgage" is a lender).
+BUSINESS_MODEL_STRONG_KEYWORDS: list[tuple[str, str]] = [
     ("REIT - Mortgage", "lender"),
     ("REIT", "reit"),
     ("Banks", "bank"),
-    ("Capital Markets", "bank"),
-    ("Investment - Banking", "bank"),
-    ("Financial - Mortgages", "lender"),
     ("Insurance", "insurer"),
+]
+# Financial Services companies are lenders when gross interest income is at least this
+# share of revenue. Calibrated on the local store (FY2021-25): payment networks and
+# processors <= 2.1% (V, MA 0; PYPL, GPN ~2%), lenders >= 20% (AXP 20-32%, SOFI 33-76%,
+# COF ~80%, ALLY 81-111%, SYF 109-136%).
+LENDER_INTEREST_INCOME_SHARE = 0.10
+# Within Capital Markets / Investment Banking / Asset Management, an interest share at
+# or above this means a lender or BDC (ARCC 97%); between LENDER_INTEREST_INCOME_SHARE
+# and this, a balance-sheet broker-dealer or wealth platform (SCHW 56%, IBKR 41%, RJF 23%).
+BDC_INTEREST_INCOME_SHARE = 0.80
+BROKER_INDUSTRY_KEYWORDS = ("Capital Markets", "Investment - Banking", "Asset Management")
+# FMP sometimes leaves interest income unmapped (reported as ~0) for lenders (ENVA,
+# SEZL, KLAR). When the share is below this AND receivables are at least
+# UNMAPPED_LENDER_RECEIVABLES_SHARE of total assets, the company is treated as a lender.
+# Receivables alone don't work: PYPL has 59% of assets in receivables but interest is mapped.
+UNMAPPED_INTEREST_SHARE = 0.005
+UNMAPPED_LENDER_RECEIVABLES_SHARE = 0.40
+BUSINESS_MODEL_WEAK_KEYWORDS: list[tuple[str, str]] = [
+    ("Financial - Mortgages", "lender"),
     ("Asset Management", "asset_manager"),
 ]
-# Financial Services companies not caught above are lenders when gross interest income
-# is at least this share of revenue. Calibrated on the local store (FY2021-25): payment
-# networks/processors <= 2.1% (V, MA 0; PYPL, GPN ~2%), lenders >= 20% (AXP 20-32%,
-# SOFI 33-76%, COF ~80%, ALLY 81-111%, SYF 109-136%). FMP sometimes reports 0 for an
-# unmapped field (AFRM 2022-25), so the rule can miss a lender, never flag a payments firm.
-LENDER_INTEREST_INCOME_SHARE = 0.10
+# Captive finance (non-financial companies with a lending arm): receivables at least this
+# share of total assets (PCAR 49%, DE 54%; highest non-captive control ABNB 32%), OR
+# derived cost of debt more than DCF_CAPTIVE_COD_GAP below the risk-free rate while debt
+# exceeds DCF_CAPTIVE_DEBT_WEIGHT of capital (F 0.75% / 77%, GM 0.56% / 64%). A low cost of
+# debt alone is NOT a signal: GOOGL, META, XOM, MSFT all derive < 2.5% from legacy coupons.
+CAPTIVE_RECEIVABLES_SHARE = 0.40
+# Disclosed backstop for misfires the rules can't see from FMP data. Every applied
+# override is shown in reports. Keys: kind (optional), captive (bool), subtype, reason.
+BUSINESS_MODEL_OVERRIDES: dict[str, dict[str, Any]] = {
+    "CAT": {"captive": True, "reason": "Cat Financial; finance receivables not mapped by FMP"},
+    "HOG": {"captive": True, "reason": "Harley-Davidson Financial Services"},
+    "EQH": {
+        "kind": "insurer",
+        "subtype": "life",
+        "reason": "life & annuity insurer filed as Asset Management",
+    },
+    "PFG": {
+        "kind": "insurer",
+        "subtype": "life",
+        "reason": "life & retirement insurer filed as Asset Management",
+    },
+    "FCFS": {"kind": "lender", "reason": "pawn lender; loans not mapped to receivables or interest income"},
+    "EZPW": {"kind": "lender", "reason": "pawn lender; loans not mapped to receivables or interest income"},
+    "ECPG": {"kind": "lender", "reason": "debt buyer; portfolio income not mapped as interest income"},
+}
 
 # Peer-multiple valuation (relative_valuation.peer_valuation): method by business model.
 PEER_METHOD_BY_KIND = {
@@ -65,6 +106,7 @@ PEER_METHOD_BY_KIND = {
     "bank": "pb",
     "lender": "pb",
     "insurer": "pb",
+    "broker_dealer": "pb",
     "reit": "pffo",
 }
 PEER_TARGET_MIN_PEERS = 5  # fewer usable peers -> no peer-implied price
@@ -121,6 +163,12 @@ SCORE_WEIGHTS = {
 # Financial health for banks/lenders/insurers: equity / total assets (current ratio,
 # D/E and interest coverage are meaningless for deposit- or float-funded balance sheets).
 EQUITY_TO_ASSETS_BANDS = [(0.12, 100), (0.10, 80), (0.08, 60), (0.06, 30), (float("-inf"), 10)]
+
+# Peer P/B ROE adjustment safeguards: peers with negative TTM earnings are excluded from
+# the P/B and ROE aggregates; peer ROE must exceed long-run growth by at least this; the
+# (ROE_s - g)/(ROE_p - g) factor must fall in this range, else the result is not blended.
+PEER_ROE_MIN_SPREAD = 0.04
+PEER_ROE_ADJ_BOUNDS = (0.33, 3.0)
 
 # Composite score (0-100) -> rating thresholds
 SCORE_RATING_BANDS = [
