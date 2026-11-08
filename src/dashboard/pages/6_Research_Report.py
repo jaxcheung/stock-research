@@ -63,7 +63,7 @@ if tpl:
             width="stretch",
         )
         if tpl["unavailable"]:
-            st.markdown("**Not available on FMP Starter (never proxied silently):**")
+            st.markdown("**Not available on FMP Starter, so not scored:**")
             st.markdown("\n".join(f"- {u}" for u in tpl["unavailable"]))
 
 st.markdown(report_text)

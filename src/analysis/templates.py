@@ -28,11 +28,6 @@ METRICS: dict[str, tuple[str, str]] = {
     "equityToAssets": ("equity/assets", "pct"),
     "roa": ("ROA", "pct"),
     "efficiencyRatio": ("efficiency ratio", "pct"),
-    "ffoMargin": ("FFO margin (approx.)", "pct"),
-    "ffoToAssets": ("FFO ÷ assets (approx.)", "pct"),
-    "ffoPerShareGrowth": ("FFO per share growth (approx.)", "pct"),
-    "netDebtToEbitda": ("net debt/EBITDA", "x"),
-    "ebitdaCoverage": ("EBITDA ÷ interest", "x"),
 }
 
 
@@ -113,7 +108,9 @@ def compute_metrics(
     """Every template metric for one company-year, from FMP-named statement dicts. A metric that
     is not meaningful is None with a note; one that is missing is just None."""
     inc, pri, bal = income or {}, prior_income or {}, balance or {}
-    cf, pcf = cashflow or {}, prior_cashflow or {}
+    # cashflow / prior_cashflow: part of the interface for templates that need cash-flow items
+    # (none of the active templates do yet — the REIT FFO proxy was withdrawn)
+    del cashflow, prior_cashflow
     m = MetricSet()
     v = m.values
 
@@ -138,8 +135,16 @@ def compute_metrics(
         m.revenue_basis = "net of interest expense"
     v["netMargin"] = _ratio(ni, rev_now)
     v["roa"] = _ratio(ni, assets)
+    # Efficiency ratio needs NET revenue: only when FMP presents this year gross (so revenue −
+    # interest expense is known). Otherwise FMP's revenue is neither gross nor net (BKU: revenue
+    # below interest income) and opex ÷ revenue would read 33% instead of ~53% — n/m.
     net_rev = scorecard_revenue(inc or None, kind, subtype)
-    v["efficiencyRatio"] = _ratio(inc.get("operatingExpenses"), net_rev)
+    if net_rev is not None and rev_reported is not None and net_rev != rev_reported:
+        v["efficiencyRatio"] = _ratio(inc.get("operatingExpenses"), net_rev)
+    else:
+        v["efficiencyRatio"] = None
+        if kind == "bank":
+            m.notes["efficiencyRatio"] = "n/m (FMP revenue is not presented gross, net revenue unknown)"
 
     # growth
     v["revenueGrowth"] = yoy_growth(_f(rev_now), _f(rev_prior))
@@ -177,31 +182,6 @@ def compute_metrics(
         v["interestCoverage"] = _ratio(inc.get("operatingIncome"), interest)
     v["equityToAssets"] = _ratio(equity, assets)
 
-    # REITs: approximate FFO = net income + D&A − POSITIVE non-operating income. NAREIT FFO excludes
-    # gains on property sales; FMP doesn't separate them, so positive "other income" (gains,
-    # remeasurements, JV income) is removed — conservative: SPG FY2025 net income + D&A was $6.2bn on
-    # a $2.2bn gain (reported FFO ~$5bn); this gives $3.9bn. Never inflated by a one-off gain.
-    def _ffo(i: dict[str, Any], c: dict[str, Any]) -> float | None:
-        n, dep = _f(i.get("netIncome")), _f(c.get("depreciationAndAmortization"))
-        if dep is None:
-            dep = _f(i.get("depreciationAndAmortization"))
-        if n is None or dep is None:
-            return None
-        return n + dep - max(0.0, _f(i.get("totalOtherIncomeExpensesNet")) or 0.0)
-
-    ffo = _ffo(inc, cf)
-    v["ffoMargin"] = _ratio(ffo, rev_reported)
-    v["ffoToAssets"] = _ratio(ffo, assets)
-    pffo = _ffo(pri, pcf)
-    sh, psh = _f(inc.get("weightedAverageShsOutDil")), _f(pri.get("weightedAverageShsOutDil"))
-    v["ffoPerShareGrowth"] = yoy_growth(_ratio(ffo, sh), _ratio(pffo, psh))
-    # EBITDA ex positive non-operating income, consistent with FFO (FMP's EBITDA includes gains)
-    ebitda = _f(inc.get("ebitda"))
-    if ebitda is not None:
-        ebitda -= max(0.0, _f(inc.get("totalOtherIncomeExpensesNet")) or 0.0)
-    debt, cash = _f(bal.get("totalDebt")), _f(bal.get("cashAndCashEquivalents")) or 0.0
-    v["netDebtToEbitda"] = _ratio(debt - cash, ebitda) if debt is not None else None
-    v["ebitdaCoverage"] = _ratio(ebitda, interest) if interest and interest > 0 else None
     return m
 
 

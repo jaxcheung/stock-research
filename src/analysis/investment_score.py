@@ -182,6 +182,10 @@ def compute_investment_score(
         "compositeScore": round(composite_score, 1),
         "rating": rating,
         "dimensions": dimensions,
+        # fewer than 3 of 4 dimensions scored: the composite rests on the few that are left (weights
+        # renormalised) — disclosed as a PARTIAL scorecard, the same bar the backtest applies
+        "scoredDimensions": (n_scored := sum(d["score"] is not None for d in dimensions.values())),
+        "partial": n_scored < 3,
         "valuation": _score_valuation(stock, dcf_result, peer_val),
         "dcfIntrinsicValue": dcf_result["intrinsicValuePerShare"] if dcf_result else None,
         "dcfUpsidePct": dcf_result["upsidePct"] if dcf_result else None,

@@ -51,6 +51,9 @@ BUSINESS_MODEL_STRONG_KEYWORDS: list[tuple[str, str]] = [
     ("REIT - Mortgage", "lender"),
     ("REIT", "reit"),
     ("Banks", "bank"),
+    # Insurance BROKERS take no underwriting risk (AJG, BRO): fee businesses, judged like operating
+    # companies ("standard" ends classification here: fiduciary-fund interest isn't lending).
+    ("Insurance - Brokers", "standard"),
     ("Insurance", "insurer"),
 ]
 # Financial Services companies are lenders when gross interest income is at least this
@@ -223,8 +226,8 @@ EQUITY_TO_ASSETS_BANDS = [(0.12, 100), (0.10, 80), (0.08, 60), (0.06, 30), (floa
 #
 # Bands: (threshold, score). mode "higher": first threshold the value is >= wins (highest first).
 # mode "lower": first threshold the value is <= wins (lowest first). The generic bands are the
-# original scorecard's; the bank / REIT / insurer bands are calibrated so a typical company in
-# that industry lands mid-range (cross-section of FY2023-25 statements, not returns).
+# original scorecard's; the bank bands (ROA, efficiency) are calibrated so a typical bank lands
+# mid-range (cross-section of FY2023-25 statements, not returns).
 SCORECARD_METRIC_BANDS: dict[str, dict[str, Any]] = {
     # generic (original scorecard)
     "roe": {
@@ -265,27 +268,6 @@ SCORECARD_METRIC_BANDS: dict[str, dict[str, Any]] = {
     "efficiencyRatio": {
         "mode": "lower",
         "bands": [(0.50, 100), (0.55, 80), (0.62, 60), (0.68, 40), (0.78, 20), (float("inf"), 0)],
-    },
-    # REITs: approximate FFO (net income + D&A) margin and yield on assets; leverage on EBITDA
-    "ffoMargin": {
-        "mode": "higher",
-        "bands": [(0.60, 100), (0.50, 80), (0.40, 60), (0.30, 40), (0.20, 20), (float("-inf"), 0)],
-    },
-    "ffoToAssets": {
-        "mode": "higher",
-        "bands": [(0.08, 100), (0.065, 80), (0.05, 60), (0.04, 40), (0.03, 20), (float("-inf"), 0)],
-    },
-    "ffoPerShareGrowth": {
-        "mode": "higher",
-        "bands": [(0.10, 100), (0.06, 80), (0.03, 60), (0.0, 40), (float("-inf"), 0)],
-    },
-    "netDebtToEbitda": {
-        "mode": "lower",
-        "bands": [(4.0, 100), (5.0, 80), (6.0, 60), (7.0, 40), (8.5, 20), (float("inf"), 0)],
-    },
-    "ebitdaCoverage": {
-        "mode": "higher",
-        "bands": [(7.0, 100), (5.5, 80), (4.0, 60), (3.0, 40), (2.0, 20), (float("-inf"), 0)],
     },
 }
 
@@ -341,44 +323,53 @@ SCORECARD_TEMPLATES: dict[str, dict[str, Any]] = {
         ],
     },
     "reit": {
-        "label": "REITs",
+        # INTERIM: the general rules (unchanged from before templates). A REIT-specific template needs
+        # NAREIT FFO, which FMP Starter can't reconstruct: impairments, property-sale gains and
+        # discontinued operations aren't separable, and "other income" nets interest expense — a
+        # proxy built from them produced wrong-direction FFO growth (BXP, MAC) and a 120% FFO
+        # margin (RYN). Redesign pending (see CLAUDE.md milestones).
+        "label": "REITs (interim: general rules)",
         "kinds": ["reit"],
         "dimensions": {
-            "quality": ["ffoMargin", "ffoToAssets"],
-            "growth": ["revenueGrowth", "ffoPerShareGrowth"],
-            "financialHealth": ["netDebtToEbitda", "ebitdaCoverage"],
+            "quality": ["roe", "netMargin"],
+            "growth": ["revenueGrowth", "netIncomeGrowth"],
+            "financialHealth": ["currentRatio", "debtToEquity", "interestCoverage"],
         },
-        "why": "REIT earnings are understated by real-estate depreciation, so profitability and growth use "
-        "funds from operations (approximated as net income + D&A − positive non-operating income, so gains on "
-        "sale can't inflate it; JV income is excluded too, which understates JV-heavy REITs). Leverage "
-        "is measured the way REITs and their lenders do: net debt ÷ EBITDA and EBITDA ÷ interest.",
-        "valuation": ["Peer P/FFO", "DCF not applicable"],
+        "why": "Interim: REITs are scored on the general rules. GAAP earnings understate REITs (real-estate "
+        "depreciation), so quality and growth here are conservative; a REIT template based on FFO needs data "
+        "FMP Starter does not provide.",
+        "valuation": ["Peer P/FFO (approximate FFO = net income + D&A)", "DCF not applicable"],
         "display": ["ffoMargin", "pFfo", "dividendYield", "payoutRatio", "debtToAssets", "netDebtToEbitda"],
         "unavailable": [
-            "NAREIT FFO and AFFO (gains on sale / impairments not separable) — FFO is approximate",
+            "NAREIT FFO / AFFO (impairments, gains on sale, discontinued operations not separable)",
             "Same-store NOI growth, occupancy, lease expiries",
             "Net asset value (NAV) per share",
+            "EBITDAre and lease-adjusted leverage",
         ],
     },
     "insurer": {
-        "label": "Insurers",
+        # INTERIM: the pre-template insurer rules. The ROE-only / EPS-growth template over-weighted
+        # insurers 3x in the picks (hard P&C market, catastrophe recoveries, equity mark-to-market).
+        # Redesign pending: book-value-per-share growth, multi-year ROE, debt/capital.
+        "label": "Insurers (interim rules)",
         "kinds": ["insurer"],
         "dimensions": {
-            "quality": ["roe"],
-            "growth": ["revenueGrowth", "epsGrowth"],
+            "quality": ["roe", "netMargin"],
+            "growth": ["revenueGrowth", "netIncomeGrowth"],
         },
         "unscored": {
             "financialHealth": "not scored for insurers — solvency metrics (RBC ratio, combined ratio) are not "
             "available on FMP Starter, and equity ÷ assets is distorted by separate-account assets",
         },
-        "why": "Insurers are judged on return on equity and growth in premiums and EPS. Net margin is not "
-        "comparable between life and P&C business, and solvency needs regulatory data FMP doesn't provide.",
+        "why": "Interim rules: return on equity and net margin, revenue and earnings growth. An insurer-specific "
+        "template (book value growth, multi-year ROE, debt/capital) is pending.",
         "valuation": ["ROE-adjusted peer P/B", "DCF not applicable"],
         "display": ["roe", "financialLeverage", "debtToCapital", "pb", "dividendYield"],
         "unavailable": [
             "Combined ratio, loss ratio, reserve development (P&C)",
             "Risk-based capital (RBC) / solvency ratio",
             "Embedded value, new-business margin (life)",
+            "Earnings ex investment mark-to-market (equity-heavy insurers: BRK, MKL)",
         ],
     },
     "lender_broker": {
@@ -509,10 +500,12 @@ BACKTEST_SCORECARD_MIN_GROWTH_COVERAGE = 0.8
 # new trial in the deflated Sharpe instead of silently replacing the old one.
 #   1 = original; 2 = net revenue for banks, growth-base rule, lease-excluded captive debt,
 #       ROE-only quality for bank-type models (2026-11-08)
-#   3 = industry templates (SCORECARD_TEMPLATES): banks (ROE, ROA, efficiency ratio, net revenue +
-#       EPS growth), REITs (FFO margin / yield, FFO-per-share growth, net debt/EBITDA, EBITDA
-#       coverage), insurers (ROE, revenue + EPS growth) (2026-11-08)
-SCORECARD_RULES_VERSION = 3
+#   3 = first template draft incl. REIT FFO and ROE-only insurer templates (withdrawn after review:
+#       wrong FFO arithmetic, insurer tilt) — its backtest trials stay in the ledger (2026-11-08)
+#   4 = bank template (ROE, ROA, efficiency ratio, net revenue + EPS growth, equity/assets);
+#       insurance brokers scored as operating companies; REITs and insurers on interim
+#       (pre-template) rules (2026-11-08)
+SCORECARD_RULES_VERSION = 4
 BACKTEST_LIQUIDITY_WINDOW = 63
 # Random-pick placebo: this many seeds, GROSS of costs, judged against the equal-weight universe.
 # Expect about 5% of seeds "significant" at the 5% level; materially more means a biased pipeline.

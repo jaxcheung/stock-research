@@ -505,6 +505,12 @@ def render_research_report(
         val_str = f"{val['score']}/100" if val["score"] is not None else "n/a"
         lines.append(f"| *valuation signal (excluded)* | {val_str} | {val['rationale']} |")
     lines.append("")
+    if score.get("partial"):
+        lines.append(
+            f"⚠️ **Partial scorecard:** only {score['scoredDimensions']} of 4 dimensions could be scored, so the "
+            "composite and rating rest on those alone (weights renormalised). Treat the rating as indicative."
+        )
+        lines.append("")
     tpl = stock.get("template")
     if tpl:
         # Which metrics judged this company — decided by its industry template, not ad hoc.

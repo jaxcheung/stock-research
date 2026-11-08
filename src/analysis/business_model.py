@@ -249,6 +249,12 @@ def classify(
 
     for keyword, kind in BUSINESS_MODEL_STRONG_KEYWORDS:
         if keyword.lower() in ind:
+            if kind == "standard":
+                # insurance brokers: fee businesses, no underwriting; interest on FIDUCIARY client funds
+                # (RYAN) is not lending, so the interest-income tests must not run
+                return BusinessModel(
+                    "standard", f"FMP industry '{industry}' — fee business, no underwriting or lending"
+                )
             subtype = None
             if kind == "insurer":
                 subtype = "life" if "life" in ind else "pc"
