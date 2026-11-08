@@ -247,6 +247,25 @@ def _rating_from_score(score: float) -> str:
     return SCORE_RATING_BANDS[-1][1]
 
 
+def score_business(stock: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], float | None, str | None]:
+    """The fundamental-quality rule, shared by the live scorecard and the backtester: business
+    dimensions only (valuation is reported alongside, never blended in), each banded, missing
+    dimensions dropped and the remaining weights renormalised. Returns (dimensions, composite
+    0-100 or None when nothing is scoreable, rating or None)."""
+    dimensions = {
+        "quality": _score_quality(stock),
+        "growth": _score_growth(stock),
+        "financialHealth": _score_financial_health(stock),
+        "momentum": _score_momentum(stock),
+    }
+    scored = {name: d["score"] for name, d in dimensions.items() if d["score"] is not None}
+    if not scored:
+        return dimensions, None, None
+    total_weight = sum(SCORE_WEIGHTS[name] for name in scored)
+    composite = sum(scored[name] * SCORE_WEIGHTS[name] for name in scored) / total_weight
+    return dimensions, composite, _rating_from_score(composite)
+
+
 def compute_investment_score(
     symbol: str,
     client: FMPClient | None = None,
@@ -274,21 +293,9 @@ def compute_investment_score(
             logger.warning("Peer valuation unavailable for %s: %s", symbol, exc)
             peer_val = None
 
-    # Business dimensions only — valuation is reported alongside, never blended in.
-    dimensions = {
-        "quality": _score_quality(stock),
-        "growth": _score_growth(stock),
-        "financialHealth": _score_financial_health(stock),
-        "momentum": _score_momentum(stock),
-    }
-
-    scored = {name: d["score"] for name, d in dimensions.items() if d["score"] is not None}
-    if not scored:
+    dimensions, composite_score, rating = score_business(stock)
+    if composite_score is None:
         raise ValueError(f"No scoreable dimensions available for {symbol}")
-
-    total_weight = sum(SCORE_WEIGHTS[name] for name in scored)
-    composite_score = sum(scored[name] * SCORE_WEIGHTS[name] for name in scored) / total_weight
-    rating = _rating_from_score(composite_score)
 
     return {
         "symbol": stock["symbol"],

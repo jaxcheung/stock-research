@@ -9,6 +9,7 @@
 #   counted in `missingReturns` (survivorship caveat: delisted names are not in the store).
 
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -36,7 +37,8 @@ class BacktestResult:
     gross: pd.Series
     turnover: pd.Series
     holdings: pd.Series  # number of positions
-    weights: dict[pd.Timestamp, pd.Series] = field(default_factory=dict)
+    weights: dict[pd.Timestamp, pd.Series] = field(default_factory=dict)  # target weights after trading at t
+    drifted: dict[pd.Timestamp, pd.Series] = field(default_factory=dict)  # weights at t BEFORE trading
     missing_returns: int = 0
     notes: list[str] = field(default_factory=list)
 
@@ -102,8 +104,27 @@ def build_weights(scores: pd.Series, ctx: Context, strategy: Strategy, top_n: in
     scores = scores.replace([np.inf, -np.inf], np.nan).dropna()
     if scores.empty:
         return pd.Series(dtype=float)
-    n = strategy.top_n or top_n or BACKTEST_TOP_N
-    picks = scores.sort_values(ascending=False).iloc[:n].index
+    n = len(scores) if strategy.hold_all else strategy.top_n or top_n or BACKTEST_TOP_N
+    ranked = scores.sort_values(ascending=False)
+    if strategy.kind == "stock" and not strategy.hold_all:
+        # Constrained selection: at most floor(cap × N) names per sector, best-ranked first, the rest
+        # filled from the next-ranked names in other sectors — equal weights then respect the sector
+        # cap without re-weighting (scaling 24 tech picks to 1.25% while the other 26 got 2.69% made
+        # the 49th-ranked non-tech name weigh twice the #1 tech name).
+        per_sector = max(1, int(BACKTEST_SECTOR_CAP * n + 1e-9))
+        sec = ctx.data.sectors.reindex(ranked.index).fillna("Unknown")
+        count: dict[str, int] = {}
+        chosen: list[Any] = []
+        for s in ranked.index:
+            k = str(sec.get(s))
+            if count.get(k, 0) < per_sector:
+                chosen.append(s)
+                count[k] = count.get(k, 0) + 1
+                if len(chosen) == n:
+                    break
+        picks = pd.Index(chosen)
+    else:
+        picks = ranked.iloc[:n].index
     if strategy.weighting == "inverse_vol":
         vol = ctx.history(12)[list(picks)].std(ddof=1).replace(0, np.nan)
         w = (1 / vol).dropna()
@@ -124,9 +145,17 @@ def run_backtest(
     cost_bps: float = BACKTEST_COST_BPS,
     top_n: int | None = None,
     keep_weights: bool = False,
+    rebalance_every: int = 1,
+    anchor: int = 0,
 ) -> BacktestResult:
+    """rebalance_every: trade every k-th month-end (1 = monthly, 3 = quarterly, 12 = annually);
+    in between, positions drift with the market and nothing is traded."""
     if cost_bps < 0:
         raise ValueError(f"cost_bps must be >= 0, got {cost_bps}")
+    if rebalance_every not in (1, 3, 6, 12):
+        raise ValueError(f"rebalance_every must be 1, 3, 6 or 12 months, got {rebalance_every}")
+    if not 0 <= anchor < rebalance_every:
+        raise ValueError(f"anchor must be in [0, {rebalance_every}), got {anchor}")
     lo = pd.Timestamp(start) if start else None
     hi = pd.Timestamp(end) if end else None
     dates = pd.DatetimeIndex(
@@ -140,12 +169,27 @@ def run_backtest(
         raise ValueError("Backtest window needs at least 3 month-ends")
     net, gross, turn, hold = {}, {}, {}, {}
     weights: dict[pd.Timestamp, pd.Series] = {}
+    drifted: dict[pd.Timestamp, pd.Series] = {}
     prev = pd.Series(dtype=float)  # weights after last month's drift
     missing = 0
     thin_months: list[str] = []
     thin_signal: list[str] = []
     cap_cash: list[str] = []
-    for t, t_next in zip(dates[:-1], dates[1:], strict=True):
+    for i, (t, t_next) in enumerate(zip(dates[:-1], dates[1:], strict=True)):
+        # trade in the first month (to invest) and then every k-th month counted from `anchor`
+        if i != 0 and (i - anchor) % rebalance_every != 0:
+            # hold: no trades, no costs; positions drift with next month's returns
+            r_hold = data.returns.loc[t_next].reindex(prev.index)
+            missing += int(r_hold.isna().sum())
+            r_hold = r_hold.fillna(0.0)
+            cash = max(0.0, 1.0 - float(prev.sum()))
+            rf = float(data.rf.get(t_next, 0.0))
+            g = float((prev * r_hold).sum()) + cash * rf
+            net[t_next], gross[t_next], turn[t_next], hold[t_next] = g, g, 0.0, len(prev)
+            grown = prev * (1 + r_hold)
+            total = float(grown.sum()) + cash * (1 + rf)
+            prev = pd.Series(grown / total) if total > 0 else pd.Series(dtype=float)
+            continue
         if strategy.kind == "stock":
             uni, fund, cap = universe_at(data, t)
             if len(uni) < BACKTEST_MIN_UNIVERSE:
@@ -157,6 +201,7 @@ def run_backtest(
         want = strategy.top_n or top_n or BACKTEST_TOP_N
         if (
             strategy.kind == "stock"
+            and not strategy.hold_all
             and len(uni) >= BACKTEST_MIN_UNIVERSE
             and scores.dropna().size < min(want, len(uni))
         ):
@@ -178,6 +223,7 @@ def run_backtest(
         net[t_next], gross[t_next], turn[t_next], hold[t_next] = g - cost, g, to, len(target)
         if keep_weights:
             weights[t] = target
+            drifted[t] = prev.copy()
         grown = target * (1 + r_next)
         total = float(grown.sum()) + cash * (1 + rf)
         prev = pd.Series(grown / total) if total > 0 else pd.Series(dtype=float)
@@ -189,6 +235,7 @@ def run_backtest(
         pd.Series(turn),
         pd.Series(hold),
         weights,
+        drifted,
         missing,
     )
     if thin_months:

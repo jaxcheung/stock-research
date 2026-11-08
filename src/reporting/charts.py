@@ -1543,3 +1543,57 @@ def walk_forward_chart(wf: pd.DataFrame, t: Theme, bench: str) -> go.Figure:
     )
     fig.update_layout(barmode="group", hovermode="x unified")
     return fig
+
+
+def portfolio_value_chart(
+    value: pd.Series, bench: pd.Series, t: Theme, name: str, bench_name: str
+) -> go.Figure:
+    """Simulated portfolio value in dollars vs the same capital in the benchmark (one axis)."""
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=bench.index,
+            y=bench,
+            mode="lines",
+            name=bench_name,
+            line={"color": t.ink, "width": 2, "dash": "dash"},
+            hovertemplate="$%{y:,.0f}<extra>" + bench_name + "</extra>",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=value.index,
+            y=value,
+            mode="lines",
+            name=name,
+            line={"color": t.series[0], "width": 2},
+            hovertemplate="$%{y:,.0f}<extra>" + name + "</extra>",
+        )
+    )
+    fig.update_yaxes(title_text="Portfolio value ($)", tickprefix="$", tickformat=",.0f")
+    return _layout(fig, t, "Portfolio value", "Net of transaction costs · dividends reinvested", 440)
+
+
+def allocation_area_chart(weights: pd.DataFrame, t: Theme, title: str) -> go.Figure:
+    """Stacked weights over time (dates x categories, rows sum to 1). Colour follows the
+    category; largest average weight first."""
+    order = list(weights.mean().sort_values(ascending=False).index)
+    fig = go.Figure()
+    for i, c in enumerate(order):
+        color = t.neutral_mark if c == "Cash" else series_color(t, i)
+        fig.add_trace(
+            go.Scatter(
+                x=weights.index,
+                y=weights[c],
+                mode="lines",
+                name=str(c),
+                stackgroup="one",
+                line={"width": 0.5, "color": color},
+                fillcolor=_rgba(color, 0.75),
+                hovertemplate="%{y:.1%}<extra>" + str(c) + "</extra>",
+            )
+        )
+    fig.update_yaxes(title_text="Portfolio weight", tickformat=".0%", range=[0, 1])
+    _layout(fig, t, title, "At each rebalance, after trading", 420)
+    fig.update_layout(hovermode="x unified")
+    return fig

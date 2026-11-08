@@ -222,7 +222,21 @@ Built incrementally, starting cheap:
   (stubs/duplicates deduped); growth only between two full years (330–400 days apart). Value
   signals use USD reporters only (currency rule); preferred lines (`-P`/`-P<letter>` symbols,
 which carry the issuer's name) are never stock-universe members. The placebo tests engine
-mechanics only — it cannot detect universe/survivorship look-ahead, and must say so. Position and sector caps are never breached:
+mechanics only — it cannot detect universe/survivorship look-ahead, and must say so.
+  Universe members also pass a liquidity screen (median daily $ volume ≥ `BACKTEST_MIN_DOLLAR_VOLUME`
+  over 63 sessions — GLXY's pre-Nasdaq OTC line cleared $2bn on 3 shares a day).
+  The **fundamental scorecard is backtested with the SAME rule** as the report
+  (`investment_score.score_business`; `backtest/scorecard.py` only builds point-in-time inputs from
+  annual statements + daily MAs, and `business_model.classify` per company-year) — never a copy of the
+  bands. Scorecard strategies rank on the business score; any valuation screen is a separate, labelled
+  filter. Stock strategies also report alpha vs the equal-weight universe (does the signal pick better
+  stocks?) as a second, Holm-adjusted family of tests, separate from beating SPY. Scorecard suites
+  start only once ≥ `BACKTEST_SCORECARD_MIN_GROWTH_COVERAGE` of the universe has a growth score (a
+  3-dimension first year produced ALL of scorecard_top's apparent edge); a stock needs growth to be
+  ranked. Point-in-time balance stubs fall back to the prior period (same rule as `data_quality`);
+  zero equity is missing, not negative; the captive-finance test uses the static rf so labels don't
+  flip with the rate cycle. Top-N selection caps names per sector (floor(cap × N), next-ranked names
+  fill) with equal weights — never re-weight by scaling sectors. Position and sector caps are never breached:
   if infeasible, the excess sits in cash (noted).
   Every suite reports HAC alpha (t, p, n), bootstrap CIs, a **deflated Sharpe on ACTIVE returns
   vs SPY** (on excess over T-bills it just measures the equity premium) whose trial count comes
@@ -313,6 +327,9 @@ mechanics only — it cannot detect universe/survivorship look-ahead, and must s
       deflated Sharpe, bootstrap, placebo, walk-forward; Backtest Lab page; LLM backend (`claude -p`
       on Pro, API stub) with usage/cost ledger. Next: news + regulation feeds, analyst, strategist and
       PM agents (forward-evaluated), budget review.
+- [x] Fundamental-scorecard backtest + portfolio simulator (2026-11-08): the report's scorecard
+      rebuilt point-in-time and backtested (top-N, all-Buy, Buy + E/P screen), monthly to annual
+      rebalancing, liquidity screen, alpha vs equal-weight universe; Portfolio simulator tab.
 - [ ] News integration into reports (news endpoint exists in `fmp_client.py`,
       not yet wired into analysis output or the dashboard).
 - [x] Quant Lab (2026-11-05): source-agnostic series loader (FRED incl. keyless
@@ -449,7 +466,11 @@ scripts like `~/bedrock_setup.sh` are outside the project and the repo).
   (`STRATEGIES`: factor signals, sector-ETF rotation, controls incl. placebo; `universe_at`),
   `engine.py` (`run_backtest`: monthly long-only, caps, sector cap, costs, cash at rf),
   `evaluate.py` (metrics, HAC alpha, IR, deflated Sharpe, block bootstrap, walk-forward),
-  `lab.py` (`run_lab` suite orchestrator + `run_placebo`), `trials.py` (persistent trial ledger). `src/dashboard/pages/11_Backtest_Lab.py`.
+  `lab.py` (`run_lab` suite orchestrator + `run_placebo`; `rebalance_every`, `top_n`), `trials.py`
+  (persistent trial ledger), `scorecard.py` (point-in-time fundamental scorecard + `scorecard_top` /
+  `scorecard_buy` / `scorecard_value` signals), `simulate.py` (`simulate` → $ value, holdings with
+  scores, trades, sector allocation, calendar-year returns). Page 11 has two tabs: Compare strategies
+  and Portfolio simulator. `src/dashboard/pages/11_Backtest_Lab.py`.
 - `src/llm/` — `backend.py` (`complete(agent, system, prompt, schema)`; `claude_code` / `anthropic_api`)
   and `usage.py` (SQLite ledger + `summary(group_by)` for the budget review).
 - `src/data/store.py` prices: `upsert_prices` / `load_prices` (`data/store/fmp/prices/daily/`);

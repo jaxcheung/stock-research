@@ -165,6 +165,7 @@ def evaluate(
     controls: tuple[str, ...] = (),
     test_fraction: float = BACKTEST_WALK_FORWARD_TEST_FRACTION,
     prior_trial_irs: list[float] | None = None,
+    rebalance_every: int = 1,
 ) -> EvaluationReport:
     """prior_trial_irs: information ratios of OTHER configurations tried before (trial ledger);
     they count towards the deflated-Sharpe trial number and dispersion."""
@@ -183,10 +184,18 @@ def evaluate(
         m = metrics(res.returns, rf, res.turnover)
         vb = vs_benchmark(res.returns, bench, rf) if name != benchmark else {}
         sr_lo, sr_hi = bootstrap_ci(res.returns - rf.reindex(res.returns.index).fillna(0.0), sharpe_annual)
+        # Second, separately-labelled test for stock strategies: does the selection beat the
+        # stocks it chooses FROM (equal-weight eligible universe)? Answers "does the signal pick
+        # better stocks" independently of the universe vs SPY (equal weight vs cap weight).
+        vu: dict[str, Any] = {}
+        if res.kind == "stock" and "universe_ew" in results and name != "universe_ew":
+            u = vs_benchmark(res.returns, results["universe_ew"].returns, rf)
+            vu = {"alphaVsUniverse": u.get("alphaAnnual"), "alphaPVsUniverse": u.get("alphaP")}
         rows.append(
             {
                 "strategy": name,
                 "kind": res.kind,
+                **vu,
                 "control": name in controls,
                 **m,
                 **vb,
@@ -258,8 +267,8 @@ def evaluate(
         )
     rep = EvaluationReport(table, wf, selection)
     rep.findings = _findings(rep, benchmark, trial_names, len(trial_irs))
-    rep.methodology = _methodology(benchmark, test_fraction)
-    rep.caveats = _caveats(results)
+    rep.methodology = _methodology(benchmark, test_fraction, rebalance_every)
+    rep.caveats = _caveats(results, rebalance_every)
     return rep
 
 
@@ -300,6 +309,27 @@ def _findings(rep: EvaluationReport, benchmark: str, trials: list[str], n_trials
                 else "."
             )
         )
+    if "alphaPVsUniverse" in t.columns:
+        vu = t.loc[[n for n in trials if n in t.index]].dropna(subset=["alphaPVsUniverse"])
+        if not vu.empty:
+            # A second family of tests: Holm step-down adjustment within it.
+            p_sorted = vu["alphaPVsUniverse"].astype(float).sort_values()
+            m = len(p_sorted)
+            holm: dict[str, float] = {}
+            running = 0.0
+            for k, (name, p) in enumerate(p_sorted.items()):
+                running = max(running, min(1.0, (m - k) * float(p)))
+                holm[str(name)] = running
+            raw_sig = int((p_sorted < STATS_SIGNIFICANCE_LEVEL).sum())
+            best = str(p_sorted.index[0])
+            out.append(
+                f"Stock selection vs the equal-weight universe each strategy picks from (a separate question from "
+                f"beating SPY): {raw_sig} of {m} significant before adjustment (≈{m * STATS_SIGNIFICANCE_LEVEL:.1f} "
+                f"expected by chance); best **{best}** alpha {_fmt(_num(vu.at[best, 'alphaVsUniverse']), '+.1%')}/yr, "
+                f"p = {_fmt(float(p_sorted.iloc[0]), '.3f')}, Holm-adjusted p = {_fmt(holm[best], '.3f')}."
+            )
+            for name, hp in holm.items():
+                t.loc[name, "alphaPVsUniverseHolm"] = hp
     sel = rep.selection
     if "best" in sel:
         oos_beats = _num(sel["sharpeOOS"]) > _num(sel["benchSharpeOOS"])
@@ -333,12 +363,30 @@ def _findings(rep: EvaluationReport, benchmark: str, trials: list[str], n_trials
     return out
 
 
-def _methodology(benchmark: str, test_fraction: float) -> list[str]:
+_CADENCE = {1: "Monthly", 3: "Quarterly", 6: "Semi-annual", 12: "Annual"}
+
+
+def _methodology(benchmark: str, test_fraction: float, rebalance_every: int = 1) -> list[str]:
+    cadence = _CADENCE.get(rebalance_every, f"Every-{rebalance_every}-month")
+    drift = (
+        f" Between rebalances (every {rebalance_every} months) positions drift with the market and nothing trades."
+        if rebalance_every > 1
+        else ""
+    )
     return [
-        "Monthly rebalancing at month-end close; long-only; returns are dividend-adjusted total returns earned the "
-        "FOLLOWING month; transaction costs = turnover × cost bps; uninvested weight earns the 3-month T-bill.",
+        f"{cadence} rebalancing at month-end close; long-only; returns are dividend-adjusted total returns earned the "
+        "FOLLOWING month; transaction costs = turnover × cost bps; uninvested weight earns the 3-month T-bill."
+        + drift,
+        "Top-N strategies hold at most 30% of their names in one sector (best-ranked first; the rest are filled from "
+        "the next-ranked names elsewhere) and weight them equally; rules that hold every qualifying stock are scaled "
+        "to the 30% sector cap instead.",
+        "Fundamental scorecard: the Research Report's own rule (same bands and weights) on point-in-time inputs — "
+        "ROE and net margin, revenue and net-income growth vs the prior full year, current ratio / D/E / interest "
+        "coverage (equity/assets for banks and lenders; unscored for insurers and captive finance), and price vs its "
+        "50/200-day averages. A stock needs a growth score and 3+ dimensions to be ranked.",
         "Point-in-time: fundamentals usable only from max(filing/acceptance date, fiscal year end + 60 days) + 1 day; "
-        "universe membership uses market cap = month-end close × shares from the latest filed statement.",
+        "universe membership uses market cap = month-end close × shares from the latest filed statement, plus a "
+        "liquidity screen (median daily dollar volume over the last 63 sessions ≥ $5m).",
         "Sortino uses downside deviation over all months (target = T-bill). "
         f"Sharpe/Sortino on excess returns over T-bills, annualised ×√12. Alpha/beta vs {benchmark.upper()} from an "
         "excess-return regression with Newey-West (HAC) standard errors; alpha shown with t, p and n.",
@@ -348,14 +396,37 @@ def _methodology(benchmark: str, test_fraction: float) -> list[str]:
         "strategy at a time does not reset the count) and for skew/kurtosis. Controls are not counted as trials.",
         "Placebo: many random-pick portfolios (different seeds), gross of costs, regressed on the equal-weight "
         "universe. About 5% should look 'significant' by chance; materially more flags a biased pipeline.",
+        "Test size: on ~100 months the HAC alpha t-test over-rejects — about 7–9% of zero-alpha random-pick "
+        "portfolios look significant at 5% (measured on 200–300 placebo seeds). Treat p-values near 0.05 as weaker "
+        "than they look.",
         "95% confidence intervals by stationary block bootstrap (6-month blocks, 2,000 resamples, fixed seed).",
         f"Walk-forward: the last {test_fraction:.0%} of months are held out; the strategy with the best in-sample "
         "Sharpe is selected and judged only on the held-out months.",
     ]
 
 
-def _caveats(results: dict[str, BacktestResult]) -> list[str]:
-    out = [
+def _caveats(results: dict[str, BacktestResult], rebalance_every: int = 1) -> list[str]:
+    out = []
+    if rebalance_every > 1:
+        out.append(
+            f"Rebalance timing: with a {rebalance_every}-month cadence, results depend on WHICH months the trades fall "
+            "in (anchored to the start date); shifting the anchor by a few months moved annual-rebalance CAGRs by several points "
+            "in testing — compare frequencies with this in mind."
+        )
+    if any(n.startswith("scorecard") for n in results):
+        out.append(
+            "Scorecard business models (bank / insurer / captive finance / ...) use TODAY's FMP sector and industry "
+            "labels and today's config overrides; the captive-finance test uses the static long-run rf assumption so "
+            "the label doesn't flip with the rate cycle."
+        )
+        out.append(
+            "Scorecard rules shared with the live Research Report, now exercised at scale: bank 'revenue' is FMP's gross "
+            "figure (interest income included), so bank revenue growth is inflated in rising-rate years; net-income "
+            "growth from a negative base (losses narrowing, return to profit) can reach the top growth band; lenders "
+            "and BDCs score high on bank-calibrated equity/assets bands; insurers can reach 100 on three dimensions. "
+            "The picks over-weight asset managers, lenders and insurers and under-weight banks and REITs."
+        )
+    out += [
         "Survivorship bias: the stock universe is built from companies listed today; companies that were delisted, "
         "acquired or went bankrupt are absent, which flatters stock strategies (ETF results are less affected).",
         "Sector labels are today's FMP classification, applied to all history.",
