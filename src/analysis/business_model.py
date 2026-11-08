@@ -95,25 +95,69 @@ def interest_income_share(income: dict[str, Any] | None) -> float | None:
     return float(ii) / float(revenue)
 
 
+NET_REVENUE_KINDS = ("bank", "lender", "broker_dealer")
+
+
+def _reports_gross(income: dict[str, Any] | None) -> bool:
+    """True when FMP's revenue for this year visibly INCLUDES gross interest income: interest income
+    and expense both reported, revenue >= ~interest income, and net interest income positive and
+    equal to interest income - interest expense. The NII tie-out stops already-net revenue being
+    netted again when FMP under-maps interest income (IBKR FY2025: NII negative, revenue already net)."""
+    if not income:
+        return False
+    rev = income.get("revenue")
+    ii, ie = income.get("interestIncome") or 0.0, income.get("interestExpense") or 0.0
+    if rev is None or ii <= 0 or ie <= 0 or rev < 0.98 * ii or rev - ie <= 0:
+        return False
+    nii = income.get("netInterestIncome")
+    return nii is None or (nii > 0 and abs(float(nii) - (ii - ie)) <= 0.02 * ii)
+
+
 def scorecard_revenue(income: dict[str, Any] | None, kind: str, subtype: str | None = None) -> float | None:
     """Revenue on the basis the industry reports it. FMP's revenue for banks, broker-dealers and card
     lenders is GROSS (interest income + non-interest income), so in rising-rate years it grows with
-    the deposit/funding cost it never keeps (JPM FY2023 +54% gross vs +21% net; 87% of banks got the
-    top growth band). Net revenue = revenue − interest expense ties to company-reported figures (JPM
-    $155bn, BAC $98.6bn, GS $46.3bn, AXP $60.5bn, COF $36.8bn). Applied only when interest income is
-    clearly a component of revenue; BDCs and mortgage REITs (total investment income / net interest
-    presentation) are left as reported."""
-    if not income:
+    the funding cost it never keeps (JPM FY2023 +54% gross vs +21% net; 87% of banks got the top
+    growth band). Net revenue = revenue − interest expense ties to company-reported figures (JPM
+    $155bn, BAC $98.6bn, GS $46.3bn, AXP $60.5bn, COF $36.8bn). BDCs and mortgage REITs are left
+    as reported. For growth, use `revenue_pair` — never decide the basis one year at a time."""
+    if not income or income.get("revenue") is None:
         return None
-    revenue = income.get("revenue")
-    if revenue is None:
+    revenue = float(income["revenue"])
+    if kind in NET_REVENUE_KINDS and subtype not in PLAIN_PB_SUBTYPES and _reports_gross(income):
+        return revenue - float(income.get("interestExpense") or 0.0)
+    return revenue
+
+
+def revenue_pair(
+    current: dict[str, Any] | None, prior: dict[str, Any] | None, kind: str, subtype: str | None = None
+) -> tuple[float | None, float | None, str]:
+    """(current revenue, prior revenue, basis) on ONE basis for both years: 'net' when both years
+    report gross, 'reported' when neither does (or the company isn't a bank-type model), 'mixed'
+    when FMP switched presentation between the years — the prior is then None, so growth is n/m
+    rather than a net year compared with a gross one (TFC FY2025 read -16% instead of +53%)."""
+    cur_rev = (current or {}).get("revenue")
+    pri_rev = (prior or {}).get("revenue")
+    if kind not in NET_REVENUE_KINDS or subtype in PLAIN_PB_SUBTYPES:
+        return cur_rev, pri_rev, "reported"
+    g_now, g_prior = _reports_gross(current), _reports_gross(prior) if prior else None
+    if g_prior is None:
+        return scorecard_revenue(current, kind, subtype), None, "net" if g_now else "reported"
+    if g_now and g_prior:
+        return scorecard_revenue(current, kind, subtype), scorecard_revenue(prior, kind, subtype), "net"
+    if not g_now and not g_prior:
+        return cur_rev, pri_rev, "reported"
+    return scorecard_revenue(current, kind, subtype), None, "mixed"
+
+
+def yoy_growth(current: float | None, prior: float | None) -> float | None:
+    """Scorecard growth. Positive base: (c - p) / p. Negative base: a WORSE result (loss widening)
+    is negative growth, so it lands in the bottom band; an improvement from a loss (narrowing, or
+    returning to profit) is n/m — not 'growth', and must not reach the top band. Zero base: n/m."""
+    if current is None or prior is None or prior == 0:
         return None
-    if kind not in ("bank", "lender", "broker_dealer") or subtype in PLAIN_PB_SUBTYPES:
-        return float(revenue)
-    ii, ie = income.get("interestIncome") or 0.0, income.get("interestExpense") or 0.0
-    if ii > 0 and ie > 0 and revenue >= 0.98 * ii and revenue - ie > 0:
-        return float(revenue) - float(ie)
-    return float(revenue)
+    if prior > 0:
+        return (current - prior) / prior
+    return (current - prior) / abs(prior) if current < prior else None
 
 
 def financing_debt(balance: dict[str, Any] | None) -> float:

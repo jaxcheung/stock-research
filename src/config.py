@@ -94,6 +94,11 @@ CAPTIVE_INTEREST_INCOME_SHARE = 0.05
 BUSINESS_MODEL_OVERRIDES: dict[str, dict[str, Any]] = {
     "CAT": {"captive": True, "reason": "Cat Financial; finance receivables not mapped by FMP"},
     "HOG": {"captive": True, "reason": "Harley-Davidson Financial Services"},
+    "CAR": {
+        "captive": True,
+        "reason": "vehicle-program (fleet) debt, which FMP files as lease obligations; its interest is "
+        "booked as a vehicle cost, not interest expense",
+    },
     "HGV": {"captive": True, "reason": "timeshare receivables funded by securitised debt"},
     "VAC": {"captive": True, "reason": "timeshare receivables funded by securitised debt"},
     "EQH": {
@@ -313,6 +318,12 @@ BACKTEST_MIN_DOLLAR_VOLUME = 5e6
 # (quality 0.38/0.69 instead of 0.38); in testing that first year produced all of scorecard_top's
 # apparent edge over SPY.
 BACKTEST_SCORECARD_MIN_GROWTH_COVERAGE = 0.8
+# Version of the fundamental-scorecard RULES (bands, definitions). Bump it whenever a rule changes:
+# it is part of the trial-ledger key, so a rule revised after seeing backtest results counts as a
+# new trial in the deflated Sharpe instead of silently replacing the old one.
+#   1 = original; 2 = net revenue for banks, growth-base rule, lease-excluded captive debt,
+#       ROE-only quality for bank-type models (2026-11-08)
+SCORECARD_RULES_VERSION = 2
 BACKTEST_LIQUIDITY_WINDOW = 63
 # Random-pick placebo: this many seeds, GROSS of costs, judged against the equal-weight universe.
 # Expect about 5% of seeds "significant" at the 5% level; materially more means a biased pipeline.

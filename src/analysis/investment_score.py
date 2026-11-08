@@ -103,7 +103,11 @@ def _score_quality(stock: dict[str, Any]) -> dict[str, Any]:
     negative_equity = equity is not None and equity <= 0
     roe = None if negative_equity else p["returnOnEquity"]  # ROE on negative equity is not meaningful
     roe_score = _band_score_higher_better(roe, _ROE_BANDS)
-    margin_score = _band_score_higher_better(p["netProfitMargin"], _MARGIN_BANDS)
+    # Banks / lenders / broker-dealers have no cost of goods sold: net margin on (net) revenue isn't
+    # comparable with an industrial's (87% of banks sat in the top band, median 28.6% vs 7.4%).
+    # Their quality is scored on ROE alone.
+    bank_type = stock.get("businessModel") in ("bank", "lender", "broker_dealer")
+    margin_score = None if bank_type else _band_score_higher_better(p["netProfitMargin"], _MARGIN_BANDS)
 
     valid_scores = [s for s in (roe_score, margin_score) if s is not None]
     score = round(sum(valid_scores) / len(valid_scores)) if valid_scores else None
@@ -114,7 +118,10 @@ def _score_quality(stock: dict[str, Any]) -> dict[str, Any]:
     elif p["returnOnEquity"] is not None:
         notes.append(f"ROE {p['returnOnEquity']:.1%}")
     if p["netProfitMargin"] is not None:
-        notes.append(f"net margin {p['netProfitMargin']:.1%}")
+        notes.append(
+            f"net margin {p['netProfitMargin']:.1%}"
+            + (" (shown, not scored for financials)" if bank_type else "")
+        )
     return {"score": score, "rationale": ", ".join(notes) if notes else "Insufficient data", "detail": p}
 
 
@@ -132,6 +139,8 @@ def _score_growth(stock: dict[str, Any]) -> dict[str, Any]:
         notes.append(f"{'net ' if net_basis else ''}revenue growth {g['revenueGrowthYoY']:.1%} YoY")
     if net_basis:
         notes.append("revenue net of interest expense (FMP reports it gross)")
+    elif g.get("revenueBasis") == "changed between years":
+        notes.append("revenue growth n/m (FMP switched between gross and net presentation)")
     if g["netIncomeGrowthYoY"] is not None:
         notes.append(f"net income growth {g['netIncomeGrowthYoY']:.1%} YoY")
     elif g.get("priorNetIncomeNonPositive"):

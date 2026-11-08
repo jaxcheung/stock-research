@@ -22,7 +22,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from src.analysis.business_model import classify, scorecard_revenue
+from src.analysis.business_model import classify, revenue_pair, yoy_growth
 from src.analysis.investment_score import score_business
 from src.backtest.strategies import Context, _full_year, _usd_reporting
 from src.config import (
@@ -55,10 +55,7 @@ def _ratio(a: Any, b: Any, positive_denominator: bool = True) -> float | None:
 
 
 def _growth(cur: Any, prev: Any) -> float | None:
-    c, p = _f(cur), _f(prev)
-    if c is None or p is None or p <= 0:
-        return None  # n/m from a zero or negative base — same rule as stock_analysis._growth
-    return (c - p) / p
+    return yoy_growth(_f(cur), _f(prev))  # same rule as the live scorecard
 
 
 def stock_inputs(sym: str, row: pd.Series, ctx: Context) -> dict[str, Any]:
@@ -96,13 +93,15 @@ def stock_inputs(sym: str, row: pd.Series, ctx: Context) -> dict[str, Any]:
     bm = classify(profile, income, balance, risk_free_rate=DCF_RISK_FREE_RATE)
     # Same revenue basis as the live scorecard (net of interest expense for gross-reporting banks,
     # broker-dealers and card lenders), for BOTH years so growth compares like with like.
-    rev = scorecard_revenue(income, bm.kind, bm.subtype)
     prior = {
         "revenue": _f(row.get("prevRevenue")),
         "interestIncome": _f(row.get("prevInterestIncome")),
         "interestExpense": _f(row.get("prevInterestExpense")),
+        "netInterestIncome": _f(row.get("prevNetInterestIncome")),
     }
-    rev_prior = scorecard_revenue(prior, bm.kind, bm.subtype) if prior["revenue"] is not None else None
+    rev, rev_prior, basis = revenue_pair(
+        income, prior if prior["revenue"] is not None else None, bm.kind, bm.subtype
+    )
     net_basis = rev is not None and rev != income["revenue"]
     prev_ni = _f(row.get("prevNetIncome"))
     interest = _f(row.get("interestExpense"))
@@ -120,7 +119,12 @@ def stock_inputs(sym: str, row: pd.Series, ctx: Context) -> dict[str, Any]:
         "growth": {
             "revenueGrowthYoY": _growth(rev, rev_prior),
             "netIncomeGrowthYoY": _growth(row.get("netIncome"), prev_ni),
-            "revenueBasis": "net of interest expense" if net_basis else "reported",
+            # basis "mixed" wins: growth is n/m because FMP switched presentation between the years
+            "revenueBasis": "changed between years"
+            if basis == "mixed"
+            else "net of interest expense"
+            if net_basis
+            else "reported",
             "priorNetIncomeNonPositive": prev_ni is not None and prev_ni <= 0,
         },
         "leverage": {

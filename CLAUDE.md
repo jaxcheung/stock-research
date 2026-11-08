@@ -119,12 +119,18 @@ Built incrementally, starting cheap:
     beyond → "low precision" range. One method within the band → "(single method)". In both
     of those, the score is capped to `VALUATION_SCORE_CAP`. One method beyond the band →
     "Indicative only", unscored. Strong valuation scores need corroboration.
-  - Scorecard revenue (`business_model.scorecard_revenue`, live AND point-in-time): banks,
-    broker-dealers and card lenders are measured on revenue NET of interest expense — FMP reports it
-    gross (interest income + non-interest income), which gave 87% of banks the top growth band in
-    FY2023 (11% on net); BDCs / mortgage REITs stay as reported. Growth from a zero or negative base
-    is n/m ("prior-year loss"), never the top band. The captive-finance tests use debt EXCLUDING
-    lease liabilities (`financing_debt`: MGM's VICI leases made a 1% "cost of debt").
+  - Scorecard revenue (`business_model.revenue_pair` / `scorecard_revenue`, live AND point-in-time):
+    banks, broker-dealers and card lenders are measured on revenue NET of interest expense — FMP
+    reports it gross, which gave 87% of banks the top growth band in FY2023 (11% on net). A year counts
+    as gross only if NII ties to interest income − expense (IBKR's already-net revenue isn't netted
+    twice). ONE basis for both years of a growth figure; if FMP switched presentation, growth is n/m
+    ("changed between years"). BDCs / mortgage REITs stay as reported. Bank-type quality is ROE only
+    (net margin isn't comparable without COGS). Report tables show reported AND net revenue.
+  - Growth (`business_model.yoy_growth`): from a negative base, a worse result is negative growth
+    (bottom band); an improvement is n/m ("prior-year loss"), never the top band.
+  - Captive-finance tests use debt EXCLUDING lease liabilities (`financing_debt`: MGM's VICI leases
+    made a 1% "cost of debt"); fleet debt filed as leases (CAR) is a disclosed override.
+  - `SCORECARD_RULES_VERSION` is part of each scorecard trial's ledger key: bump it on any rule change.
   - Scorecard: banks/lenders/broker-dealers are scored on equity ÷ assets; insurers'
     financial health is not scored (separate-account assets make equity/assets meaningless;
     RBC/combined ratio unavailable); negative equity makes D/E and ROE "n/m"; captive
