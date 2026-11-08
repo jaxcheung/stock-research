@@ -291,6 +291,10 @@ def _identify_risks(report: dict[str, Any]) -> list[str]:
 def _executive_summary(report: dict[str, Any], target: ValuationSummary, valuation_verdict: str) -> list[str]:
     stock, score = report["stock"], report["score"]
     bullets = [f"**Fundamental quality: {score['rating']}** — composite score {score['compositeScore']}/100."]
+    if score.get("partial"):
+        bullets.append(
+            f"⚠️ Partial scorecard — only {score['scoredDimensions']} of 4 dimensions scored; the rating is indicative."
+        )
     bullets.append(
         f"**Valuation: {valuation_verdict}** (see price target below) — a separate question from quality."
     )
@@ -335,10 +339,14 @@ def _executive_summary(report: dict[str, Any], target: ValuationSummary, valuati
 
 
 def render_research_report(
-    symbol: str, client: FMPClient | None = None, max_peers: int = DEFAULT_MAX_PEERS
+    symbol: str,
+    client: FMPClient | None = None,
+    max_peers: int = DEFAULT_MAX_PEERS,
+    report: dict[str, Any] | None = None,
 ) -> str:
-    """Render generate_research_report() output as a full markdown equity research report."""
-    report = generate_research_report(symbol, client=client, max_peers=max_peers)
+    """Render generate_research_report() output as a full markdown equity research report.
+    Pass `report` to render one already generated (the dashboard reuses it for the template panel)."""
+    report = report or generate_research_report(symbol, client=client, max_peers=max_peers)
     stock, dcf, macro, score = (
         report["stock"],
         report["dcf"],
@@ -501,6 +509,27 @@ def render_research_report(
         val_str = f"{val['score']}/100" if val["score"] is not None else "n/a"
         lines.append(f"| *valuation signal (excluded)* | {val_str} | {val['rationale']} |")
     lines.append("")
+    if score.get("partial"):
+        lines.append(
+            f"⚠️ **Partial scorecard:** only {score['scoredDimensions']} of 4 dimensions could be scored, so the "
+            "composite and rating rest on those alone (weights renormalised). Treat the rating as indicative."
+        )
+        lines.append("")
+    tpl = stock.get("template")
+    if tpl:
+        # Which metrics judged this company — decided by its industry template, not ad hoc.
+        lines.append(f"**Scoring template: {tpl['template']}.** {tpl['why']}")
+        lines.append("")
+        scored = "; ".join(f"{dim}: {', '.join(ms)}" for dim, ms in tpl["scored"].items())
+        lines.append(f"- Scored — {scored}.")
+        for dim, reason in tpl["unscored"].items():
+            lines.append(f"- {dim}: {reason}.")
+        lines.append(f"- Valuation methods for this model: {'; '.join(tpl['valuation'])}.")
+        if tpl["unavailable"]:
+            lines.append(
+                "- Not available on FMP Starter (so not used): " + "; ".join(tpl["unavailable"]) + "."
+            )
+        lines.append("")
 
     lines.append("## Key Risks")
     lines.extend(f"- {r}" for r in _identify_risks(report))

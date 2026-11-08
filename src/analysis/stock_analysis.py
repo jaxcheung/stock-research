@@ -2,9 +2,10 @@
 
 from typing import Any
 
-from src.analysis.business_model import classify, revenue_pair, scorecard_revenue, yoy_growth
+from src.analysis.business_model import classify, scorecard_revenue, yoy_growth
 from src.analysis.data_quality import check_statements, latest_complete_balance
 from src.analysis.dcf import live_risk_free_rate
+from src.analysis.templates import compute_metrics, describe, template_for
 from src.data.fmp_client import FMPClient, FMPError
 from src.utils.logging import get_logger
 
@@ -79,12 +80,22 @@ def analyze_stock(symbol: str, client: FMPClient | None = None, years: int = 5) 
     total_assets = latest_bs.get("totalAssets")
     equity_to_assets = total_equity / total_assets if total_equity is not None and total_assets else None
 
-    # Banks / broker-dealers / card lenders: revenue net of interest expense (scorecard_revenue)
-    rev_now, rev_prior, basis = revenue_pair(latest_income, prior_income or None, model.kind, model.subtype)
-    net_basis = rev_now is not None and rev_now != latest_income.get("revenue")
-    net_margin = latest_ratios.get("netProfitMargin")
-    if net_basis and rev_now and latest_income.get("netIncome") is not None:
-        net_margin = float(latest_income["netIncome"]) / rev_now
+    # Template metrics (templates.compute_metrics): the one computation the scorecard scores and
+    # the backtest replays point-in-time. Cash-flow rows are matched to the income statement by date.
+    def _cash_for(row: dict[str, Any]) -> dict[str, Any] | None:
+        return next((c for c in cash_rows if row and c.get("date") == row.get("date")), None)
+
+    metrics = compute_metrics(
+        latest_income,
+        prior_income or None,
+        latest_bs or None,
+        _cash_for(latest_income),
+        _cash_for(prior_income),
+        model.kind,
+        model.subtype,
+        model.captive_finance,
+    )
+    template = template_for(model.kind, model.captive_finance)
     prior_ni = prior_income.get("netIncome")
 
     revenue_history = [
@@ -119,6 +130,8 @@ def analyze_stock(symbol: str, client: FMPClient | None = None, years: int = 5) 
         "businessModelReason": model.reason,
         "captiveFinance": model.captive_finance,
         "businessModelOverride": model.override,
+        "metrics": metrics,
+        "template": describe(template),
         "valuation": {
             "peRatio": None if currency_mismatch else latest_ratios.get("priceToEarningsRatio"),
             "pbRatio": None if currency_mismatch else latest_ratios.get("priceToBookRatio"),
@@ -129,20 +142,16 @@ def analyze_stock(symbol: str, client: FMPClient | None = None, years: int = 5) 
         "profitability": {
             "grossProfitMargin": latest_ratios.get("grossProfitMargin"),
             "operatingProfitMargin": latest_ratios.get("operatingProfitMargin"),
-            "netProfitMargin": net_margin,
+            "netProfitMargin": metrics.values["netMargin"],
             "returnOnEquity": latest_metrics.get("returnOnEquity"),
             "returnOnAssets": latest_metrics.get("returnOnAssets"),
             "returnOnInvestedCapital": latest_metrics.get("returnOnInvestedCapital"),
         },
         "growth": {
-            "revenueGrowthYoY": _growth(rev_now, rev_prior),
-            "netIncomeGrowthYoY": _growth(latest_income.get("netIncome"), prior_ni),
-            # basis "mixed" wins: growth is n/m because FMP switched presentation between the years
-            "revenueBasis": "changed between years"
-            if basis == "mixed"
-            else "net of interest expense"
-            if net_basis
-            else "reported",
+            "revenueGrowthYoY": metrics.values["revenueGrowth"],
+            "netIncomeGrowthYoY": metrics.values["netIncomeGrowth"],
+            "epsGrowthYoY": metrics.values["epsGrowth"],
+            "revenueBasis": metrics.revenue_basis,
             "priorNetIncomeNonPositive": prior_ni is not None and prior_ni <= 0,
         },
         "leverage": {

@@ -97,7 +97,21 @@ _F = "cf_"
 def derive_raw(d: pd.DataFrame) -> pd.DataFrame:
     d = d.copy()
     d["x_ffo"] = _c(d, "inc_netIncome") + _c(d, "inc_depreciationAndAmortization").fillna(0)
-    d["x_netRevenue"] = _c(d, "inc_revenue") - _c(d, "inc_interestExpense").fillna(0)
+    # Net revenue on the SAME rule as the scorecard (business_model._reports_gross): revenue −
+    # interest expense only in years FMP presents revenue gross (NII ties to interest income −
+    # expense); otherwise revenue as reported. Growth only between two years on the same basis.
+    rev, ii, ie = _c(d, "inc_revenue"), _c(d, "inc_interestIncome"), _c(d, "inc_interestExpense")
+    nii = _c(d, "inc_netInterestIncome")
+    gross = (
+        (ii > 0)
+        & (ie > 0)
+        & (rev >= 0.98 * ii)
+        & (rev - ie > 0)
+        & (nii.isna() | ((nii > 0) & ((nii - (ii - ie)).abs() <= 0.02 * ii)))
+    )
+    d["x_netRevenue"] = rev.where(~gross, rev - ie)
+    same_basis = gross == gross.shift(1)
+    d["x_netRevenueGrowth"] = _growth(d["x_netRevenue"]).where(same_basis)
     d["x_debtPlusEquity"] = _c(d, "bs_totalDebt") + _c(d, "bs_totalStockholdersEquity")
     d["x_tangibleEquity"] = _c(d, "bs_totalStockholdersEquity") - _c(
         d, "bs_goodwillAndIntangibleAssets"
@@ -128,6 +142,17 @@ _CATALOG: list[Indicator] = [
         True,
         "Year-over-year revenue growth.",
         _m("x_revenueGrowth"),
+    ),
+    Indicator(
+        "netRevenueGrowth",
+        "Net revenue growth",
+        "return",
+        "Growth",
+        "pct",
+        True,
+        "Year-over-year growth in revenue net of interest expense (banks, broker-dealers, card lenders: "
+        "FMP reports revenue gross); blank when FMP switched between gross and net presentation.",
+        _m("x_netRevenueGrowth"),
     ),
     Indicator(
         "epsGrowth",
