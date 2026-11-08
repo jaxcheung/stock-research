@@ -82,20 +82,21 @@ def analyze_stock(symbol: str, client: FMPClient | None = None, years: int = 5) 
 
     # Template metrics (templates.compute_metrics): the one computation the scorecard scores and
     # the backtest replays point-in-time. Cash-flow rows are matched to the income statement by date.
-    def _cash_for(row: dict[str, Any]) -> dict[str, Any] | None:
-        return next((c for c in cash_rows if row and c.get("date") == row.get("date")), None)
+    def _dated(rows: list[dict[str, Any]], row: dict[str, Any]) -> dict[str, Any] | None:
+        return next((r for r in rows if row and r.get("date") == row.get("date")), None)
 
+    # newest first, aligned to the income statements by date; [0] balance is the one in use
+    # (latest_complete_balance may have stepped back over a stub row)
+    last3 = income[:3]
     metrics = compute_metrics(
-        latest_income,
-        prior_income or None,
-        latest_bs or None,
-        _cash_for(latest_income),
-        _cash_for(prior_income),
+        last3,
+        [latest_bs or None, *[_dated(balance, r) for r in last3[1:]]],
+        [_dated(cash_rows, r) for r in last3],
         model.kind,
         model.subtype,
         model.captive_finance,
     )
-    template = template_for(model.kind, model.captive_finance)
+    template = template_for(model.kind, model.captive_finance, model.subtype)
     prior_ni = prior_income.get("netIncome")
 
     revenue_history = [
@@ -129,6 +130,7 @@ def analyze_stock(symbol: str, client: FMPClient | None = None, years: int = 5) 
         "businessModel": model.kind,
         "businessModelReason": model.reason,
         "captiveFinance": model.captive_finance,
+        "businessSubtype": model.subtype,
         "businessModelOverride": model.override,
         "metrics": metrics,
         "template": describe(template),

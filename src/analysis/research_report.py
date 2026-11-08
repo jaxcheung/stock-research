@@ -105,6 +105,11 @@ def _reconcile(rating: str, valuation_verdict: str) -> str:
 
 
 def _reconcile_core(rating: str, valuation_verdict: str) -> str:
+    if rating.startswith("Not rated"):
+        return (
+            "Fundamental quality could not be rated (too few dimensions scored), so the price can't be judged "
+            "against the business — treat any valuation view as standalone."
+        )
     good_business = rating in ("Strong Buy", "Buy")
     weak_business = rating in ("Sell", "Strong Sell")
     cheap = valuation_verdict.startswith("Attractive")
@@ -581,8 +586,14 @@ def render_research_report(
         )
     if target.precision in ("normal", "single", "low"):
         lines.append(
-            f"\n**Bottom line:** {stock['companyName']} is a {score['rating'].lower()}-quality business "
-            f"({score['compositeScore']}/100) trading at a valuation assessed as {valuation_verdict.lower()}. "
+            (
+                f"\n**Bottom line:** {stock['companyName']}'s fundamental quality is not rated (partial scorecard, "
+                f"indicative composite {score['compositeScore']}/100); valuation is assessed as "
+                f"{valuation_verdict.lower()}. "
+                if score.get("partial")
+                else f"\n**Bottom line:** {stock['companyName']} is a {score['rating'].lower()}-quality business "
+                f"({score['compositeScore']}/100) trading at a valuation assessed as {valuation_verdict.lower()}. "
+            )
             + _reconcile(score["rating"], valuation_verdict)
         )
 

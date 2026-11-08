@@ -30,6 +30,8 @@ from src.utils.logging import get_logger
 
 logger = get_logger("investment_score")
 
+NOT_RATED = "Not rated (partial scorecard)"
+
 # (threshold, score) bands, evaluated highest-threshold-first: value >= threshold wins.
 _UPSIDE_BANDS = [(0.25, 100), (0.15, 85), (0.05, 70), (0.0, 55), (-0.10, 35), (-0.25, 15), (float("-inf"), 0)]
 
@@ -123,7 +125,11 @@ def score_business(stock: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], fl
     dimensions only (valuation is reported alongside, never blended in), each banded, missing
     dimensions dropped and the remaining weights renormalised. Returns (dimensions, composite
     0-100 or None when nothing is scoreable, rating or None)."""
-    tpl = template_for(stock.get("businessModel", "standard"), bool(stock.get("captiveFinance")))
+    tpl = template_for(
+        stock.get("businessModel", "standard"),
+        bool(stock.get("captiveFinance")),
+        stock.get("businessSubtype"),
+    )
     metrics = stock.get("metrics")
     if not isinstance(metrics, MetricSet):
         raise ValueError("stock['metrics'] missing: build it with templates.compute_metrics")
@@ -174,6 +180,12 @@ def compute_investment_score(
     dimensions, composite_score, rating = score_business(stock)
     if composite_score is None:
         raise ValueError(f"No scoreable dimensions available for {symbol}")
+    n_scored = sum(d["score"] is not None for d in dimensions.values())
+    if n_scored < 3:
+        # PARTIAL: too few dimensions to rate the business (PRCH: revenue growth + momentum only read
+        # "Strong Buy"). The composite stays visible as indicative; no Buy/Sell label is given —
+        # the same bar the backtest applies (scorecard._eligible).
+        rating = NOT_RATED
 
     return {
         "symbol": stock["symbol"],
@@ -184,7 +196,7 @@ def compute_investment_score(
         "dimensions": dimensions,
         # fewer than 3 of 4 dimensions scored: the composite rests on the few that are left (weights
         # renormalised) — disclosed as a PARTIAL scorecard, the same bar the backtest applies
-        "scoredDimensions": (n_scored := sum(d["score"] is not None for d in dimensions.values())),
+        "scoredDimensions": n_scored,
         "partial": n_scored < 3,
         "valuation": _score_valuation(stock, dcf_result, peer_val),
         "dcfIntrinsicValue": dcf_result["intrinsicValuePerShare"] if dcf_result else None,

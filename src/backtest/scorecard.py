@@ -117,13 +117,42 @@ def stock_inputs(sym: str, row: pd.Series, ctx: Context) -> dict[str, Any]:
         "totalCurrentAssets": _f(row.get("totalCurrentAssets")),
         "totalCurrentLiabilities": _f(row.get("totalCurrentLiabilities")),
         "cashAndCashEquivalents": _f(row.get("cash")),
+        "accumulatedOtherComprehensiveIncomeLoss": _f(row.get("aoci")),
+        "preferredStock": _f(row.get("pref")),
     }
+    # newest first, exactly as the live path passes them (templates.compute_metrics)
+    has_prior = prior["revenue"] is not None or prior["netIncome"] is not None
     metrics = compute_metrics(
-        full_income,
-        prior if prior["revenue"] is not None or prior["netIncome"] is not None else None,
-        full_balance,
-        {"depreciationAndAmortization": _f(row.get("da"))},
-        {"depreciationAndAmortization": _f(row.get("prevDa"))},
+        [full_income, prior if has_prior else None, {"netIncome": _f(row.get("prev2NetIncome"))}],
+        [
+            full_balance,
+            {
+                "totalStockholdersEquity": _f(row.get("prevEquity")),
+                "accumulatedOtherComprehensiveIncomeLoss": _f(row.get("prevAoci")),
+                "preferredStock": _f(row.get("prevPref")),
+            },
+            {
+                "totalStockholdersEquity": _f(row.get("prev2Equity")),
+                "accumulatedOtherComprehensiveIncomeLoss": _f(row.get("prev2Aoci")),
+                "preferredStock": _f(row.get("prev2Pref")),
+            },
+        ],
+        [
+            {
+                "depreciationAndAmortization": _f(row.get("da")),
+                "netCashProvidedByOperatingActivities": _f(row.get("cfo")),
+                "commonDividendsPaid": _f(row.get("divCommon")),
+                "netDividendsPaid": _f(row.get("divNet")),
+                "preferredDividendsPaid": _f(row.get("divPref")),
+            },
+            {
+                "depreciationAndAmortization": _f(row.get("prevDa")),
+                "netCashProvidedByOperatingActivities": _f(row.get("prevCfo")),
+                "commonDividendsPaid": _f(row.get("prevDivCommon")),
+                "netDividendsPaid": _f(row.get("prevDivNet")),
+                "preferredDividendsPaid": _f(row.get("prevDivPref")),
+            },
+        ],
         bm.kind,
         bm.subtype,
         bm.captive_finance,
@@ -135,6 +164,7 @@ def stock_inputs(sym: str, row: pd.Series, ctx: Context) -> dict[str, Any]:
         "price": price,
         "businessModel": bm.kind,
         "captiveFinance": bm.captive_finance,
+        "businessSubtype": bm.subtype,
         "metrics": metrics,
         "profitability": {"returnOnEquity": v["roe"], "netProfitMargin": v["netMargin"]},
         "growth": {

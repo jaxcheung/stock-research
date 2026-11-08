@@ -97,6 +97,7 @@ CAPTIVE_INTEREST_INCOME_SHARE = 0.05
 BUSINESS_MODEL_OVERRIDES: dict[str, dict[str, Any]] = {
     "CAT": {"captive": True, "reason": "Cat Financial; finance receivables not mapped by FMP"},
     "HOG": {"captive": True, "reason": "Harley-Davidson Financial Services"},
+    "RGA": {"kind": "insurer", "subtype": "life", "reason": "life & health reinsurer filed as Reinsurance"},
     "CAR": {
         "captive": True,
         "reason": "vehicle-program (fleet) debt, which FMP files as lease obligations; its interest is "
@@ -269,6 +270,49 @@ SCORECARD_METRIC_BANDS: dict[str, dict[str, Any]] = {
         "mode": "lower",
         "bands": [(0.50, 100), (0.55, 80), (0.62, 60), (0.68, 40), (0.78, 20), (float("inf"), 0)],
     },
+    # REITs (cash-based, see templates._reit_metrics); quantile-calibrated on FY2022-25 REITs
+    # (p10/p25/median/p75/p90 -> 20/40/60/80/100), fundamentals only, not returns
+    # payout SAFETY, not quality: coverage above ~1.3x is safe and earns no more (otherwise low
+    # payers and dividend cutters score best — VNO's 2023 cut lifted it 80 -> 100)
+    "cfoDividendCoverage": {
+        "mode": "higher",
+        "bands": [(1.3, 100), (1.15, 70), (1.0, 40), (0.85, 20), (float("-inf"), 0)],
+    },
+    "cfoPerShareGrowth": {
+        "mode": "higher",
+        "bands": [(0.20, 100), (0.11, 80), (0.04, 60), (-0.03, 40), (-0.12, 20), (float("-inf"), 0)],
+    },
+    "netDebtToCashEbitda": {
+        "mode": "lower",
+        "bands": [(3.4, 100), (4.85, 80), (5.6, 60), (6.5, 40), (7.9, 20), (float("inf"), 0)],
+    },
+    "cashEbitdaCoverage": {
+        "mode": "higher",
+        "bands": [(8.5, 100), (6.1, 80), (4.8, 60), (3.9, 40), (2.9, 20), (float("-inf"), 0)],
+    },
+    # insurers (equity ex AOCI, see templates._insurer_metrics); same quantile calibration
+    "roeExAoci": {
+        "mode": "higher",
+        "bands": [(0.21, 100), (0.16, 80), (0.12, 60), (0.07, 40), (0.01, 20), (float("-inf"), 0)],
+    },
+    "roe3yExAoci": {
+        "mode": "higher",
+        "bands": [(0.22, 100), (0.15, 80), (0.12, 60), (0.08, 40), (0.045, 20), (float("-inf"), 0)],
+    },
+    "bvpsGrowthExAoci": {
+        "mode": "higher",
+        "bands": [(0.19, 100), (0.14, 80), (0.08, 60), (0.02, 40), (-0.035, 20), (float("-inf"), 0)],
+    },
+    "debtToCapitalExAoci": {
+        "mode": "lower",
+        "bands": [(0.12, 100), (0.18, 80), (0.23, 60), (0.30, 40), (0.36, 20), (float("inf"), 0)],
+    },
+    # life insurers: higher financial leverage is normal (median 30% vs 21% P&C, FY2021-24); ROE and
+    # book-value growth distributions match P&C, so those bands are shared
+    "debtToCapitalExAoci@life": {
+        "mode": "lower",
+        "bands": [(0.21, 100), (0.24, 80), (0.30, 60), (0.39, 40), (0.47, 20), (float("inf"), 0)],
+    },
 }
 
 SCORECARD_TEMPLATES: dict[str, dict[str, Any]] = {
@@ -323,53 +367,81 @@ SCORECARD_TEMPLATES: dict[str, dict[str, Any]] = {
         ],
     },
     "reit": {
-        # INTERIM: the general rules (unchanged from before templates). A REIT-specific template needs
-        # NAREIT FFO, which FMP Starter can't reconstruct: impairments, property-sale gains and
-        # discontinued operations aren't separable, and "other income" nets interest expense — a
-        # proxy built from them produced wrong-direction FFO growth (BXP, MAC) and a 120% FFO
-        # margin (RYN). Redesign pending (see CLAUDE.md milestones).
-        "label": "REITs (interim: general rules)",
+        "label": "REITs",
         "kinds": ["reit"],
         "dimensions": {
-            "quality": ["roe", "netMargin"],
-            "growth": ["revenueGrowth", "netIncomeGrowth"],
-            "financialHealth": ["currentRatio", "debtToEquity", "interestCoverage"],
+            "growth": ["revenueGrowth", "cfoPerShareGrowth"],
+            "financialHealth": ["netDebtToCashEbitda", "cashEbitdaCoverage", "cfoDividendCoverage"],
         },
-        "why": "Interim: REITs are scored on the general rules. GAAP earnings understate REITs (real-estate "
-        "depreciation), so quality and growth here are conservative; a REIT template based on FFO needs data "
-        "FMP Starter does not provide.",
-        "valuation": ["Peer P/FFO (approximate FFO = net income + D&A)", "DCF not applicable"],
-        "display": ["ffoMargin", "pFfo", "dividendYield", "payoutRatio", "debtToAssets", "netDebtToEbitda"],
+        "unscored": {
+            "quality": "not scored for REITs — the metrics that measure REIT quality (NOI margin, same-store NOI "
+            "growth, occupancy, AFFO) are not available on FMP Starter; GAAP ROE and margins are distorted by "
+            "real-estate depreciation, and dividend coverage measures payout POLICY, not quality",
+        },
+        "why": "REITs are judged on CASH, because GAAP earnings are understated by real-estate depreciation and FMP "
+        "Starter can't rebuild NAREIT FFO. Growth is revenue and operating cash flow per share; financial health "
+        "is net debt excluding lease liabilities over cash EBITDA (operating cash flow + interest), its cover of "
+        "interest, and whether operating cash flow safely covers the dividend. Impairments and gains on sale "
+        "can't move these. A year with a one-off cash receipt (operating cash flow per share ±50%) or a special "
+        "dividend is shown as n/m rather than scored.",
+        "valuation": [
+            "Peer P/FFO (approximate FFO = net income + D&A — includes gains)",
+            "DCF not applicable",
+        ],
+        "display": ["dividendYield", "payoutRatio", "debtToAssets", "netDebtToEbitda", "pFfo"],
         "unavailable": [
-            "NAREIT FFO / AFFO (impairments, gains on sale, discontinued operations not separable)",
-            "Same-store NOI growth, occupancy, lease expiries",
+            "NAREIT FFO / AFFO (impairments, gains on sale, discontinued operations not separable) — operating cash "
+            "flow used instead; it misses joint-venture income (WELL, SPG read low) and development profits (PLD)",
+            "NOI margin, same-store NOI growth, occupancy, lease expiries (so quality is not scored)",
             "Net asset value (NAV) per share",
-            "EBITDAre and lease-adjusted leverage",
+            "Pro-rata (joint-venture) debt and EBITDAre",
+        ],
+    },
+    "insurer_life": {
+        "label": "Life insurers",
+        "kinds": ["insurer"],
+        "subtypes": ["life"],
+        "band_key": "life",
+        "dimensions": {
+            "quality": ["roeExAoci", "roe3yExAoci"],
+            "growth": ["bvpsGrowthExAoci"],
+            "financialHealth": ["debtToCapitalExAoci"],
+        },
+        "why": "Life insurers are judged on common equity EXCLUDING accumulated other comprehensive income (unrealised "
+        "bond marks) and preferred stock: ROE this year and over three years, growth in book value per share, and "
+        "financial leverage. Debt/capital has a life-specific band (higher leverage than P&C is normal); ROE and "
+        "book-value bands are shared because life and P&C distributions match. Revenue growth is not scored: "
+        "pension-risk-transfer premiums and currency make it lumpy.",
+        "valuation": ["ROE-adjusted peer P/B", "DCF not applicable"],
+        "display": ["roe", "financialLeverage", "debtToCapital", "pb", "dividendYield"],
+        "unavailable": [
+            "Risk-based capital (RBC) / solvency ratio — debt ÷ capital is a leverage measure, not solvency",
+            "Embedded value, new-business margin, operating vs capital/operating debt split",
+            "Operating earnings ex investment gains and notable items",
+            "Preferred stock where FMP reports 0 (MET, PRU): it stays inside 'common' equity; FMP totalDebt may "
+            "include reserve-financing facilities (PRI)",
         ],
     },
     "insurer": {
-        # INTERIM: the pre-template insurer rules. The ROE-only / EPS-growth template over-weighted
-        # insurers 3x in the picks (hard P&C market, catastrophe recoveries, equity mark-to-market).
-        # Redesign pending: book-value-per-share growth, multi-year ROE, debt/capital.
-        "label": "Insurers (interim rules)",
+        "label": "Insurers (P&C and other)",
         "kinds": ["insurer"],
         "dimensions": {
-            "quality": ["roe", "netMargin"],
-            "growth": ["revenueGrowth", "netIncomeGrowth"],
+            "quality": ["roeExAoci", "roe3yExAoci"],
+            "growth": ["revenueGrowth", "bvpsGrowthExAoci"],
+            "financialHealth": ["debtToCapitalExAoci"],
         },
-        "unscored": {
-            "financialHealth": "not scored for insurers — solvency metrics (RBC ratio, combined ratio) are not "
-            "available on FMP Starter, and equity ÷ assets is distorted by separate-account assets",
-        },
-        "why": "Interim rules: return on equity and net margin, revenue and earnings growth. An insurer-specific "
-        "template (book value growth, multi-year ROE, debt/capital) is pending.",
+        "why": "Insurers are judged on common equity EXCLUDING accumulated other comprehensive income (unrealised bond "
+        "and equity marks) and preferred stock, as insurers and rating agencies report it. Quality is ROE this year and over three years "
+        "(smoothing catastrophe years and investment marks); growth is revenue (premiums and investment income) and "
+        "book value per share; financial health is financial leverage (debt ÷ capital). Net margin is not "
+        "comparable between life and P&C business.",
         "valuation": ["ROE-adjusted peer P/B", "DCF not applicable"],
         "display": ["roe", "financialLeverage", "debtToCapital", "pb", "dividendYield"],
         "unavailable": [
             "Combined ratio, loss ratio, reserve development (P&C)",
-            "Risk-based capital (RBC) / solvency ratio",
+            "Risk-based capital (RBC) / solvency ratio — debt ÷ capital is a leverage measure, not solvency",
             "Embedded value, new-business margin (life)",
-            "Earnings ex investment mark-to-market (equity-heavy insurers: BRK, MKL)",
+            "Operating earnings ex investment gains (equity-heavy insurers BRK, MKL: 3-year ROE only smooths it)",
         ],
     },
     "lender_broker": {
@@ -495,6 +567,11 @@ BACKTEST_MIN_DOLLAR_VOLUME = 5e6
 # (quality 0.38/0.69 instead of 0.38); in testing that first year produced all of scorecard_top's
 # apparent edge over SPY.
 BACKTEST_SCORECARD_MIN_GROWTH_COVERAGE = 0.8
+# REIT cash-metric guards (templates._reit_metrics): operating cash flow per share moving more than
+# this year on year is treated as a one-off receipt (VNO FY2025 +140%) and CFO metrics are n/m; a
+# dividend up more than this is treated as a special (PSA FY2022, RYN FY2025) and coverage is n/m.
+REIT_CFO_JUMP = 0.5
+REIT_DIVIDEND_JUMP = 0.5
 # Version of the fundamental-scorecard RULES (bands, definitions). Bump it whenever a rule changes:
 # it is part of the trial-ledger key, so a rule revised after seeing backtest results counts as a
 # new trial in the deflated Sharpe instead of silently replacing the old one.
@@ -505,7 +582,15 @@ BACKTEST_SCORECARD_MIN_GROWTH_COVERAGE = 0.8
 #   4 = bank template (ROE, ROA, efficiency ratio, net revenue + EPS growth, equity/assets);
 #       insurance brokers scored as operating companies; REITs and insurers on interim
 #       (pre-template) rules (2026-11-08)
-SCORECARD_RULES_VERSION = 4
+#   5 = REIT template (cash-based: dividend coverage, CFO + dividend per share growth, lease-
+#       excluded leverage) and insurer template (ROE + 3y ROE, revenue + BVPS growth, debt/capital,
+#       all on equity ex AOCI) (2026-11-08) — REIT design rejected in review (quality = payout policy)
+#   6 = REITs: quality unscored by design; growth revenue + CFO/share; health leverage, cover and
+#       dividend-coverage safety, with one-off-CFO and special-dividend guards. Insurers: common
+#       equity ex AOCI ex preferred; separate life template + bands (2026-11-08)
+#   7 = review fixes: CFO guard on upward jumps only (SLG's collapse stays scored); SPG-type
+#       dividend misfiling uses the total (2026-11-08)
+SCORECARD_RULES_VERSION = 7
 BACKTEST_LIQUIDITY_WINDOW = 63
 # Random-pick placebo: this many seeds, GROSS of costs, judged against the equal-weight universe.
 # Expect about 5% of seeds "significant" at the 5% level; materially more means a biased pipeline.

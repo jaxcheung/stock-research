@@ -7,13 +7,19 @@
 # statement dicts (FMP field names), so the live scorecard (stock_analysis) and the point-in-time
 # backtest (backtest/scorecard) run the same code. Pure: no I/O.
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 
-from src.analysis.business_model import revenue_pair, scorecard_revenue, yoy_growth
-from src.config import SCORECARD_METRIC_BANDS, SCORECARD_TEMPLATES
+from src.analysis.business_model import financing_debt, revenue_pair, scorecard_revenue, yoy_growth
+from src.config import (
+    REIT_CFO_JUMP,
+    REIT_DIVIDEND_JUMP,
+    SCORECARD_METRIC_BANDS,
+    SCORECARD_TEMPLATES,
+)
 
 # metric key -> (label, format) ; format "pct" | "x" (multiple) | "ratio"
 METRICS: dict[str, tuple[str, str]] = {
@@ -28,6 +34,14 @@ METRICS: dict[str, tuple[str, str]] = {
     "equityToAssets": ("equity/assets", "pct"),
     "roa": ("ROA", "pct"),
     "efficiencyRatio": ("efficiency ratio", "pct"),
+    "cfoDividendCoverage": ("dividend coverage (operating cash flow ÷ dividends)", "x"),
+    "cfoPerShareGrowth": ("operating cash flow per share growth", "pct"),
+    "netDebtToCashEbitda": ("net debt ex leases ÷ cash EBITDA (operating cash flow + interest)", "x"),
+    "cashEbitdaCoverage": ("cash EBITDA ÷ interest", "x"),
+    "roeExAoci": ("ROE ex AOCI", "pct"),
+    "roe3yExAoci": ("3-year ROE ex AOCI", "pct"),
+    "bvpsGrowthExAoci": ("book value per share growth ex AOCI", "pct"),
+    "debtToCapitalExAoci": ("debt/capital ex AOCI", "pct"),
 }
 
 
@@ -41,6 +55,7 @@ class Template:
     valuation: list[str]
     display: list[str]
     unavailable: list[str]
+    band_key: str | None = None  # bands "<metric>@<band_key>" override the shared ones (e.g. life)
 
 
 @dataclass
@@ -61,13 +76,25 @@ def _tpl(key: str) -> Template:
         valuation=t["valuation"],
         display=t["display"],
         unavailable=t["unavailable"],
+        band_key=t.get("band_key"),
     )
 
 
-def template_for(kind: str, captive_finance: bool = False) -> Template:
-    """The template for a business model. Captive-finance groups use the general template with
-    financial health unscored (consolidated ratios mix in the finance arm)."""
-    key = next((k for k, t in SCORECARD_TEMPLATES.items() if kind in t["kinds"]), "standard")
+def template_for(kind: str, captive_finance: bool = False, subtype: str | None = None) -> Template:
+    """The template for a business model (a subtype-specific one — e.g. life insurers — wins over
+    the kind's general one). Captive-finance groups use the general template with financial health
+    unscored (consolidated ratios mix in the finance arm)."""
+    key = next(
+        (
+            k
+            for k, t in SCORECARD_TEMPLATES.items()
+            if kind in t["kinds"] and subtype in t.get("subtypes", [])
+        ),
+        None,
+    ) or next(
+        (k for k, t in SCORECARD_TEMPLATES.items() if kind in t["kinds"] and not t.get("subtypes")),
+        "standard",
+    )
     t = _tpl(key)
     if captive_finance and "financialHealth" in t.dimensions:
         dims = {k: v for k, v in t.dimensions.items() if k != "financialHealth"}
@@ -76,7 +103,7 @@ def template_for(kind: str, captive_finance: bool = False) -> Template:
             "financialHealth": "not scored — captive-finance arm makes consolidated current ratio, D/E and "
             "coverage not meaningful for the operating business",
         }
-        t = Template(t.key, t.label, dims, unscored, t.why, t.valuation, t.display, t.unavailable)
+        t = Template(t.key, t.label, dims, unscored, t.why, t.valuation, t.display, t.unavailable, t.band_key)
     return t
 
 
@@ -95,22 +122,24 @@ def _ratio(a: Any, b: Any, positive_denominator: bool = True) -> float | None:
     return x / y
 
 
+def _at(rows: Sequence[dict[str, Any] | None] | None, i: int) -> dict[str, Any]:
+    return (rows[i] or {}) if rows and len(rows) > i else {}
+
+
 def compute_metrics(
-    income: dict[str, Any] | None,
-    prior_income: dict[str, Any] | None,
-    balance: dict[str, Any] | None,
-    cashflow: dict[str, Any] | None,
-    prior_cashflow: dict[str, Any] | None,
+    incomes: Sequence[dict[str, Any] | None],
+    balances: Sequence[dict[str, Any] | None],
+    cashflows: Sequence[dict[str, Any] | None],
     kind: str,
     subtype: str | None = None,
     captive_finance: bool = False,
 ) -> MetricSet:
-    """Every template metric for one company-year, from FMP-named statement dicts. A metric that
-    is not meaningful is None with a note; one that is missing is just None."""
-    inc, pri, bal = income or {}, prior_income or {}, balance or {}
-    # cashflow / prior_cashflow: part of the interface for templates that need cash-flow items
-    # (none of the active templates do yet — the REIT FFO proxy was withdrawn)
-    del cashflow, prior_cashflow
+    """Every template metric for one company-year, from FMP-named statement dicts given NEWEST
+    FIRST ([0] = the year scored, [1] = prior full year, [2] = the one before; missing = {}).
+    A metric that is not meaningful is None with a note; one that is missing is just None."""
+    inc, pri, pri2 = _at(incomes, 0), _at(incomes, 1), _at(incomes, 2)
+    bal, pbal, pbal2 = _at(balances, 0), _at(balances, 1), _at(balances, 2)
+    cf, pcf = _at(cashflows, 0), _at(cashflows, 1)
     m = MetricSet()
     v = m.values
 
@@ -182,13 +211,124 @@ def compute_metrics(
         v["interestCoverage"] = _ratio(inc.get("operatingIncome"), interest)
     v["equityToAssets"] = _ratio(equity, assets)
 
+    _reit_metrics(m, inc, pri, bal, cf, pcf)
+    _insurer_metrics(m, inc, pri, pri2, bal, pbal, pbal2)
     return m
 
 
-def _band(value: float | None, metric: str) -> int | None:
+def _dividends(c: dict[str, Any], prior: dict[str, Any] | None = None) -> float | None:
+    """Dividends paid (positive): the larger of FMP's common line and total-less-preferred. FMP
+    misfiles some lines (O FY2024 common = 0) and no single threshold separates a misfiling from
+    genuine preferred (VNO 31%, PEB 90%). One misfiling pattern is detectable: SPG FY2025 files
+    $2.8bn of a $3.2bn payout as "preferred", so common collapses to $0.4bn while the TOTAL keeps
+    rising — when the estimate falls below half of last year's common dividends while total
+    dividends did not fall, the total is used. Dividend-per-share GROWTH is not scored: specials
+    and variable policies (PSA, RYN, WY, HST) make it unreliable."""
+    common = abs(_f(c.get("commonDividendsPaid")) or 0.0)
+    net = abs(_f(c.get("netDividendsPaid")) or 0.0)
+    pref = abs(_f(c.get("preferredDividendsPaid")) or 0.0)
+    d = max(common, net - pref)
+    if prior:
+        p_est = _dividends(prior)
+        p_net = abs(_f(prior.get("netDividendsPaid")) or 0.0)
+        if p_est and d < 0.5 * p_est and net >= p_net > 0:
+            d = net  # common filed as "preferred" (SPG FY2025)
+    return d if d > 0 else None
+
+
+def _reit_metrics(
+    m: MetricSet,
+    inc: dict[str, Any],
+    pri: dict[str, Any],
+    bal: dict[str, Any],
+    cf: dict[str, Any],
+    pcf: dict[str, Any],
+) -> None:
+    """REIT metrics on CASH figures FMP reports reliably — never an FFO reconstruction (FMP Starter
+    can't separate impairments, sale gains or discontinued operations; "other income" nets
+    interest). Operating cash flow per share is within ~15% of reported FFO/AFFO per share for most
+    REITs (O, EQIX, DLR, VICI, LAMR, EXR, MAA, GLPI, PSA, AMT; low for JV-heavy WELL) and can't be
+    inflated by gains. Leverage is debt EXCLUDING leases over CASH EBITDA (operating cash flow +
+    interest), which impairments and sale gains can't move (CCI FY2024 6.2x vs −20x on operating
+    income; BXP FY2025 8.0x vs a gain-flattered 5.3x).
+    Guards: operating cash flow per share UP more than REIT_CFO_JUMP is a one-off receipt (VNO
+    FY2025 +140%) — every CFO-based metric is n/m (a fall is scored: it is real); a dividend up more
+    than REIT_DIVIDEND_JUMP is likely a special (PSA FY2022) — coverage is n/m. Smaller specials
+    (RYN FY2025 +45%) are not caught."""
+    v = m.values
+    cfo, pcfo = (
+        _f(cf.get("netCashProvidedByOperatingActivities")),
+        _f(pcf.get("netCashProvidedByOperatingActivities")),
+    )
+    div, pdiv = _dividends(cf, pcf), _dividends(pcf)
+    sh, psh = _f(inc.get("weightedAverageShsOutDil")), _f(pri.get("weightedAverageShsOutDil"))
+    cps, pcps = _ratio(cfo, sh), _ratio(pcfo, psh)
+    # UPWARD jumps only: a one-off receipt flatters every CFO metric; a collapse is real news (SLG
+    # FY2025: CFO/share −73%, dividend coverage 0.31x) and must stay visible
+    jump = cps is not None and pcps is not None and pcps > 0 and cps / pcps - 1 > REIT_CFO_JUMP
+    interest = _f(inc.get("interestExpense"))
+    ebitda = cfo + interest if cfo is not None and interest is not None and interest > 0 else None
+    cash = _f(bal.get("cashAndCashEquivalents")) or 0.0
+    debt = financing_debt(bal) if bal.get("totalDebt") is not None else None
+    if jump:
+        note = "n/m (operating cash flow per share up more than 50% — one-off receipt suspected)"
+        for k in ("cfoPerShareGrowth", "cfoDividendCoverage", "netDebtToCashEbitda", "cashEbitdaCoverage"):
+            v[k] = None
+            m.notes[k] = note
+        return
+    v["cfoPerShareGrowth"] = yoy_growth(cps, pcps)
+    special = div is not None and pdiv is not None and div > (1 + REIT_DIVIDEND_JUMP) * pdiv
+    v["cfoDividendCoverage"] = None if special else _ratio(cfo, div)
+    if special:
+        m.notes["cfoDividendCoverage"] = "n/m (dividend up more than 50% — special dividend suspected)"
+    v["netDebtToCashEbitda"] = _ratio(debt - cash, ebitda) if debt is not None else None
+    v["cashEbitdaCoverage"] = _ratio(ebitda, interest) if ebitda is not None and interest else None
+
+
+def _insurer_metrics(
+    m: MetricSet,
+    inc: dict[str, Any],
+    pri: dict[str, Any],
+    pri2: dict[str, Any],
+    bal: dict[str, Any],
+    pbal: dict[str, Any],
+    pbal2: dict[str, Any],
+) -> None:
+    """Insurer metrics on equity EXCLUDING AOCI (unrealised bond/equity marks), the basis insurers and
+    rating agencies use: MET's equity carries an $18bn AOCI loss, which halves reported equity and
+    doubles ROE and debt/capital. Multi-year ROE smooths catastrophe years and equity marks."""
+    v = m.values
+
+    def eq_x(b: dict[str, Any]) -> float | None:
+        """COMMON equity ex AOCI: preferred stock is not the common holders'. Only where FMP fills
+        preferredStock (ALL, LNC, EQH, CRBG) — FMP reports 0 for MET and PRU, whose preferred stays
+        in (disclosed in the template); ROE uses total net income, not income to common."""
+        e = _f(b.get("totalStockholdersEquity"))
+        if e is None or e == 0:
+            return None
+        aoci = _f(b.get("accumulatedOtherComprehensiveIncomeLoss")) or 0.0
+        return e - aoci - (_f(b.get("preferredStock")) or 0.0)
+
+    e0, e1, e2 = eq_x(bal), eq_x(pbal), eq_x(pbal2)
+    roes = [
+        _ratio(_f(i.get("netIncome")), e) if e is not None and e > 0 else None
+        for i, e in ((inc, e0), (pri, e1), (pri2, e2))
+    ]
+    v["roeExAoci"] = roes[0]
+    full = [r for r in roes if r is not None]
+    v["roe3yExAoci"] = sum(full) / 3 if len(full) == 3 else None  # needs all three years
+    sh, psh = _f(inc.get("weightedAverageShsOutDil")), _f(pri.get("weightedAverageShsOutDil"))
+    v["bvpsGrowthExAoci"] = yoy_growth(_ratio(e0, sh), _ratio(e1, psh))
+    debt = financing_debt(bal) if bal.get("totalDebt") is not None else None
+    v["debtToCapitalExAoci"] = (
+        _ratio(debt, debt + e0) if debt is not None and e0 is not None and e0 > 0 else None
+    )
+
+
+def _band(value: float | None, metric: str, band_key: str | None = None) -> int | None:
     if value is None:
         return None
-    spec = SCORECARD_METRIC_BANDS[metric]
+    spec = SCORECARD_METRIC_BANDS.get(f"{metric}@{band_key}") or SCORECARD_METRIC_BANDS[metric]
     bands: list[tuple[float, int]] = spec["bands"]
     for threshold, score in bands:
         if (value >= threshold) if spec["mode"] == "higher" else (value <= threshold):
@@ -217,7 +357,7 @@ def score_dimensions(t: Template, m: MetricSet) -> dict[str, dict[str, Any]]:
             notes.append("revenue net of interest expense (FMP reports it gross)")
         for k in metrics:
             val = m.values.get(k)
-            s = _band(val, k)
+            s = _band(val, k, t.band_key)
             if s is not None:
                 scores.append(s)
             if val is not None:
