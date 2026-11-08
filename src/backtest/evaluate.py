@@ -183,10 +183,18 @@ def evaluate(
         m = metrics(res.returns, rf, res.turnover)
         vb = vs_benchmark(res.returns, bench, rf) if name != benchmark else {}
         sr_lo, sr_hi = bootstrap_ci(res.returns - rf.reindex(res.returns.index).fillna(0.0), sharpe_annual)
+        # Second, separately-labelled test for stock strategies: does the selection beat the
+        # stocks it chooses FROM (equal-weight eligible universe)? Answers "does the signal pick
+        # better stocks" independently of the universe vs SPY (equal weight vs cap weight).
+        vu: dict[str, Any] = {}
+        if res.kind == "stock" and "universe_ew" in results and name != "universe_ew":
+            u = vs_benchmark(res.returns, results["universe_ew"].returns, rf)
+            vu = {"alphaVsUniverse": u.get("alphaAnnual"), "alphaPVsUniverse": u.get("alphaP")}
         rows.append(
             {
                 "strategy": name,
                 "kind": res.kind,
+                **vu,
                 "control": name in controls,
                 **m,
                 **vb,
@@ -300,6 +308,21 @@ def _findings(rep: EvaluationReport, benchmark: str, trials: list[str], n_trials
                 else "."
             )
         )
+    if "alphaPVsUniverse" in t.columns:
+        vu = t.loc[[n for n in trials if n in t.index]].dropna(subset=["alphaPVsUniverse"])
+        for name, r in vu.iterrows():
+            a, p = _num(r["alphaVsUniverse"]), _num(r["alphaPVsUniverse"])
+            if p < STATS_SIGNIFICANCE_LEVEL:
+                out.append(
+                    f"**{name}** vs the equal-weight universe it picks from: alpha {_fmt(a, '+.1%')}/yr "
+                    f"(p = {_fmt(p, '.3f')}) — "
+                    + (
+                        "it selects better-than-average stocks"
+                        if a > 0
+                        else "it selects worse-than-average stocks"
+                    )
+                    + ", a separate question from beating SPY (not adjusted for multiple testing)."
+                )
     sel = rep.selection
     if "best" in sel:
         oos_beats = _num(sel["sharpeOOS"]) > _num(sel["benchSharpeOOS"])
@@ -338,7 +361,8 @@ def _methodology(benchmark: str, test_fraction: float) -> list[str]:
         "Monthly rebalancing at month-end close; long-only; returns are dividend-adjusted total returns earned the "
         "FOLLOWING month; transaction costs = turnover × cost bps; uninvested weight earns the 3-month T-bill.",
         "Point-in-time: fundamentals usable only from max(filing/acceptance date, fiscal year end + 60 days) + 1 day; "
-        "universe membership uses market cap = month-end close × shares from the latest filed statement.",
+        "universe membership uses market cap = month-end close × shares from the latest filed statement, plus a "
+        "liquidity screen (median daily dollar volume over the last 63 sessions ≥ $5m).",
         "Sortino uses downside deviation over all months (target = T-bill). "
         f"Sharpe/Sortino on excess returns over T-bills, annualised ×√12. Alpha/beta vs {benchmark.upper()} from an "
         "excess-return regression with Newey-West (HAC) standard errors; alpha shown with t, p and n.",

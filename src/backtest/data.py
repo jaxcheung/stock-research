@@ -16,6 +16,7 @@ from pandas.tseries.holiday import GoodFriday, USMemorialDay
 
 from src.config import (
     BACKTEST_FILING_LAG_DAYS,
+    BACKTEST_LIQUIDITY_WINDOW,
     BACKTEST_MARKET_ETFS,
     BACKTEST_MIN_CAP,
     BACKTEST_MIN_REPORT_LAG_DAYS,
@@ -34,7 +35,8 @@ _PIT_SQL = """
 WITH raw AS (
     SELECT symbol, CAST(date AS DATE) AS periodEnd, reportedCurrency AS currency,
            coalesce(TRY_CAST(acceptedDate AS DATE), TRY_CAST(filingDate AS DATE)) AS filed,
-           revenue, grossProfit, operatingIncome, netIncome, weightedAverageShsOutDil AS shares
+           revenue, grossProfit, operatingIncome, netIncome, weightedAverageShsOutDil AS shares,
+           interestIncome, interestExpense, netInterestIncome
     FROM income_annual WHERE period = 'FY'
 ), r AS (
     -- fullYear is False only for a part-year period: one ending < 330 days after the previous
@@ -56,14 +58,16 @@ WITH raw AS (
     ) = 1
 ), b AS (
     SELECT symbol, CAST(date AS DATE) AS periodEnd,
-           totalAssets, totalStockholdersEquity AS equity, totalDebt
+           totalAssets, totalStockholdersEquity AS equity, totalDebt,
+           totalCurrentAssets, totalCurrentLiabilities, netReceivables, accountPayables
     FROM balance_annual WHERE period = 'FY'
 ), c AS (
     SELECT symbol, CAST(date AS DATE) AS periodEnd, freeCashFlow
     FROM cashflow_annual WHERE period = 'FY'
 ), j AS (
-    SELECT i.*, b.totalAssets, b.equity, b.totalDebt, c.freeCashFlow,
-           lag(i.revenue) OVER w AS lagRevenue, lag(i.periodEnd) OVER w AS lagPeriodEnd,
+    SELECT i.*, b.totalAssets, b.equity, b.totalDebt, b.totalCurrentAssets, b.totalCurrentLiabilities,
+           b.netReceivables, b.accountPayables, c.freeCashFlow,
+           lag(i.revenue) OVER w AS lagRevenue, lag(i.netIncome) OVER w AS lagNetIncome, lag(i.periodEnd) OVER w AS lagPeriodEnd,
            lag(i.fullYear) OVER w AS lagFullYear
     FROM i LEFT JOIN b USING (symbol, periodEnd) LEFT JOIN c USING (symbol, periodEnd)
     WINDOW w AS (PARTITION BY i.symbol ORDER BY i.periodEnd)
@@ -75,7 +79,11 @@ SELECT symbol, periodEnd, currency, fullYear,
        -- growth only between two full fiscal years 330-400 days apart (never against a stub)
        CASE WHEN fullYear AND lagFullYear AND periodEnd - lagPeriodEnd BETWEEN 330 AND 400
             THEN lagRevenue END AS prevRevenue,
-       totalAssets, equity, totalDebt, freeCashFlow
+       CASE WHEN fullYear AND lagFullYear AND periodEnd - lagPeriodEnd BETWEEN 330 AND 400
+            THEN lagNetIncome END AS prevNetIncome,
+       interestIncome, interestExpense, netInterestIncome,
+       totalAssets, equity, totalDebt, totalCurrentAssets, totalCurrentLiabilities,
+       netReceivables, accountPayables, freeCashFlow
 FROM j
 """
 
@@ -94,6 +102,14 @@ class BacktestData:
     trade_dates: pd.Series = field(default_factory=lambda: pd.Series(dtype="datetime64[ns]"))
     # memo for derived per-date values (e.g. the universe at t), shared by every strategy in a run
     memo: dict[Any, Any] = field(default_factory=dict, repr=False)
+    # 50- and 200-trading-day moving averages of the daily close, sampled at each month's last
+    # session (the scorecard's trend test: price vs its 50D / 200D averages)
+    ma50: pd.DataFrame = field(default_factory=pd.DataFrame)
+    ma200: pd.DataFrame = field(default_factory=pd.DataFrame)
+    # median daily dollar volume over the trailing liquidity window, at each month's last session
+    dollar_volume: pd.DataFrame = field(default_factory=pd.DataFrame)
+    industries: pd.Series = field(default_factory=lambda: pd.Series(dtype=object))  # today's FMP industry
+    names: pd.Series = field(default_factory=lambda: pd.Series(dtype=object))  # company name
 
     def fundamentals_asof(self, t: pd.Timestamp) -> pd.DataFrame:
         """Latest annual fundamentals per symbol that were PUBLIC at the close the rebalance
@@ -120,13 +136,19 @@ def load_backtest_data(symbols: list[str] | None = None, db: StoreDB | None = No
     if not have:
         raise ValueError("No prices in the store — run `python -m src.data.sync --prices --no-statements`")
     syms = sorted((set(symbols) if symbols else have) | (set(etfs) & have))
-    adj_cols, close_cols = {}, {}
+    adj_cols, close_cols, ma50_cols, ma200_cols, dv_cols = {}, {}, {}, {}, {}
     for s in syms:
         p = store.load_prices(s)
         if p.empty:
             continue
         p = p.set_index("date").sort_index()
+        p.index = pd.DatetimeIndex(p.index)
         adj_cols[s], close_cols[s] = p["adjClose"], p["close"]
+        ma50_cols[s] = p["close"].rolling(50, min_periods=50).mean()
+        ma200_cols[s] = p["close"].rolling(200, min_periods=200).mean()
+        if "volume" in p:
+            w = int(BACKTEST_LIQUIDITY_WINDOW)
+            dv_cols[s] = (p["close"] * p["volume"]).rolling(w, min_periods=w // 2).median()
     adj = _month_end(pd.DataFrame(adj_cols))
     close = _month_end(pd.DataFrame(close_cols))
     # Month-end resampling carries the last price of a symbol with no trades that month; a
@@ -154,6 +176,9 @@ def load_backtest_data(symbols: list[str] | None = None, db: StoreDB | None = No
     month_complete = [d for d in pd.DatetimeIndex(adj.index) if d < last_px or _is_last_session(last_px, d)]
     complete = pd.DatetimeIndex(month_complete)
     adj, close = adj.loc[complete], close.loc[complete]
+    ma50 = _month_end(pd.DataFrame(ma50_cols)).reindex(complete)
+    ma200 = _month_end(pd.DataFrame(ma200_cols)).reindex(complete)
+    dollar_volume = _month_end(pd.DataFrame(dv_cols)).reindex(complete)
     returns = adj.pct_change(fill_method=None)
 
     rf = _risk_free(pd.DatetimeIndex(adj.index))
@@ -166,11 +191,12 @@ def load_backtest_data(symbols: list[str] | None = None, db: StoreDB | None = No
     )
     pit["availableFrom"] = pd.to_datetime(pit["availableFrom"])
     pit["periodEnd"] = pd.to_datetime(pit["periodEnd"])
-    sectors = (
-        db.query("SELECT symbol, sector FROM companies").set_index("symbol")["sector"]
+    comp = (
+        db.query("SELECT symbol, companyName, sector, industry FROM companies").drop_duplicates("symbol")
         if "companies" in db.tables
-        else pd.Series(dtype=object)
-    )
+        else pd.DataFrame(columns=["symbol", "companyName", "sector", "industry"])
+    ).set_index("symbol")
+    sectors = comp["sector"]
     notes = [
         f"{len(adj.columns)} symbols with prices ({len(set(etfs) & set(adj.columns))} ETFs), "
         f"{adj.index.min():%Y-%m} to {adj.index.max():%Y-%m}; {pit['symbol'].nunique()} companies with "
@@ -179,7 +205,20 @@ def load_backtest_data(symbols: list[str] | None = None, db: StoreDB | None = No
     notes.append(_universe_source_caveat(db, [c for c in adj.columns if c not in set(etfs)]))
     trade_dates = trade.reindex(pd.DatetimeIndex(adj.index))
     return BacktestData(
-        adj, close, returns, rf, pit, sectors, [e for e in etfs if e in adj.columns], notes, trade_dates
+        adj,
+        close,
+        returns,
+        rf,
+        pit,
+        sectors,
+        [e for e in etfs if e in adj.columns],
+        notes,
+        trade_dates,
+        ma50=ma50,
+        ma200=ma200,
+        dollar_volume=dollar_volume,
+        industries=comp["industry"],
+        names=comp["companyName"],
     )
 
 

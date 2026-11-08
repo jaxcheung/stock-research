@@ -5,7 +5,8 @@
 # weights. A Context only exposes data available at the rebalance date t:
 #   - prices / returns up to and including t (month-end close)
 #   - fundamentals whose availableFrom <= t (see data.py)
-#   - the universe at t (market cap >= BACKTEST_MIN_CAP from close_t x latest filed shares)
+#   - the universe at t (market cap >= BACKTEST_MIN_CAP from close_t x latest filed shares, and
+#     median daily dollar volume >= BACKTEST_MIN_DOLLAR_VOLUME; preferreds and ETFs excluded)
 #
 # Signals (academic standard definitions, monthly):
 #   momentum_12_1   P(t-1)/P(t-12) - 1     (skip the latest month: short-term reversal)
@@ -23,7 +24,12 @@ import numpy as np
 import pandas as pd
 
 from src.backtest.data import BacktestData
-from src.config import BACKTEST_MIN_CAP, BACKTEST_MIN_HISTORY_MONTHS, BACKTEST_SECTOR_ETFS
+from src.config import (
+    BACKTEST_MIN_CAP,
+    BACKTEST_MIN_DOLLAR_VOLUME,
+    BACKTEST_MIN_HISTORY_MONTHS,
+    BACKTEST_SECTOR_ETFS,
+)
 from src.data.sync import PREFERRED_SYMBOL
 
 
@@ -50,6 +56,7 @@ class Strategy:
     weighting: str = "equal"  # "equal" | "inverse_vol"
     top_n: int | None = None  # None -> engine default for the kind
     cash_when_empty: bool = False  # all-cash (risk-free) when the signal returns nothing
+    hold_all: bool = False  # hold EVERY name the signal returns (a rule, not a top-N ranking)
 
 
 # --------------------------------------------------------------------------- universe
@@ -76,6 +83,11 @@ def _universe_at(data: BacktestData, t: pd.Timestamp) -> tuple[list[str], pd.Dat
     hist = data.adj.loc[:t].iloc[-BACKTEST_MIN_HISTORY_MONTHS:]
     enough = hist.notna().sum() >= BACKTEST_MIN_HISTORY_MONTHS
     etfs = set(data.etfs)
+    liquid = (
+        pd.Series(data.dollar_volume.loc[t]) >= BACKTEST_MIN_DOLLAR_VOLUME
+        if not data.dollar_volume.empty and t in data.dollar_volume.index
+        else pd.Series(True, index=cap.index)
+    )
     eligible = [
         str(s)
         for s, c in cap.items()
@@ -83,6 +95,7 @@ def _universe_at(data: BacktestData, t: pd.Timestamp) -> tuple[list[str], pd.Dat
         and s not in etfs
         and not PREFERRED_SYMBOL.search(str(s))  # preferred: issuer's shares x a $25 preferred price
         and bool(enough.get(s, False))
+        and bool(liquid.get(s, False))
     ]
     return sorted(eligible), fund, cap
 
@@ -221,6 +234,19 @@ def spy_buy_hold(ctx: Context) -> pd.Series:
     return pd.Series(1.0, index=["SPY"]) if "SPY" in ctx.data.adj.columns else pd.Series(dtype=float)
 
 
+def _scorecard(name: str) -> Callable[[Context], pd.Series]:
+    """Signals from the point-in-time fundamental scorecard (imported lazily: scorecard.py
+    builds on this module's Context)."""
+
+    def signal(ctx: Context) -> pd.Series:
+        from src.backtest import scorecard
+
+        fn: Callable[[Context], pd.Series] = getattr(scorecard, name)
+        return fn(ctx)
+
+    return signal
+
+
 STRATEGIES: dict[str, Strategy] = {
     s.name: s
     for s in [
@@ -238,6 +264,27 @@ STRATEGIES: dict[str, Strategy] = {
             "Multi-factor, inverse-volatility weighted",
             weighting="inverse_vol",
         ),
+        # The app's own CFA-style fundamental scorecard (quality, growth, financial health,
+        # momentum — same bands and weights as the research report), point-in-time.
+        Strategy(
+            "scorecard_top",
+            "stock",
+            _scorecard("scorecard_top"),
+            "Fundamental scorecard: highest composite score",
+        ),
+        Strategy(
+            "scorecard_buy",
+            "stock",
+            _scorecard("scorecard_buy"),
+            "Fundamental scorecard: hold every Buy / Strong Buy",
+            hold_all=True,
+        ),
+        Strategy(
+            "scorecard_value",
+            "stock",
+            _scorecard("scorecard_value"),
+            "Fundamental scorecard Buy-rated AND E/P above the universe median (separate value screen)",
+        ),
         Strategy("sector_momentum", "etf", sector_momentum, "Top 3 sector ETFs by 12-1 momentum", top_n=3),
         Strategy(
             "sector_dual_momentum",
@@ -253,7 +300,7 @@ STRATEGIES: dict[str, Strategy] = {
             "stock",
             universe_equal_weight,
             "Equal-weight eligible universe (control)",
-            top_n=10_000,
+            hold_all=True,
         ),
         Strategy("sector_ew", "etf", sector_equal_weight, "Equal-weight 11 sector ETFs (control)", top_n=11),
         Strategy("spy", "etf", spy_buy_hold, "SPY buy-and-hold (benchmark)", top_n=1),

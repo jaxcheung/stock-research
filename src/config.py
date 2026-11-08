@@ -304,6 +304,11 @@ BACKTEST_BOOTSTRAP_BLOCK = 6  # months per block in the stationary block bootstr
 BACKTEST_BOOTSTRAP_SAMPLES = 2000
 # Minimum months for an evaluation (HAC alpha, bootstrap and deflated Sharpe need >= 24).
 BACKTEST_MIN_EVAL_MONTHS = 24
+# Liquidity screen for stock-universe membership: median daily dollar volume (close x volume)
+# over the last BACKTEST_LIQUIDITY_WINDOW sessions. Keeps thinly traded predecessor listings
+# out (GLXY's pre-Nasdaq OTC line traded 3-134 shares a day but cleared the $2bn cap floor).
+BACKTEST_MIN_DOLLAR_VOLUME = 5e6
+BACKTEST_LIQUIDITY_WINDOW = 63
 # Random-pick placebo: this many seeds, GROSS of costs, judged against the equal-weight universe.
 # Expect about 5% of seeds "significant" at the 5% level; materially more means a biased pipeline.
 BACKTEST_PLACEBO_SEEDS = 20

@@ -1,0 +1,187 @@
+# src/backtest/scorecard.py
+#
+# The app's CFA-style fundamental scorecard (investment_score.score_business), rebuilt
+# POINT-IN-TIME so it can be backtested. At each rebalance date t, every eligible stock is
+# scored with exactly the same bands and weights the research report uses, from:
+#   quality          ROE (net income / ending equity; n/m if equity <= 0) and net margin
+#   growth           revenue and net income growth vs the prior FULL fiscal year
+#   financialHealth  current ratio, debt/equity, interest coverage (EBIT / interest expense);
+#                    equity / assets for banks, lenders and broker-dealers; unscored for
+#                    insurers and captive-finance groups (same rules as the live scorecard)
+#   momentum         month-end close vs its 50- and 200-trading-day moving averages
+# using only statements public by t (data.fundamentals_asof) and prices up to t.
+# The business model comes from business_model.classify on that year's statements, with
+# TODAY's FMP sector/industry labels (caveat). Valuation is NOT part of the score (CLAUDE.md
+# rule): the "value-filtered" strategy applies a separate, disclosed E/P screen.
+#
+# Differences from the live scorecard, all disclosed: annual statements instead of FMP's
+# ratio endpoints and TTM figures, and moving averages from the stored daily closes.
+
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from src.analysis.business_model import classify
+from src.analysis.investment_score import score_business
+from src.backtest.strategies import Context, _full_year, _usd_reporting
+from src.config import SCORE_RATING_BANDS
+from src.utils.logging import get_logger
+
+logger = get_logger("backtest.scorecard")
+
+DIMENSIONS = ("quality", "growth", "financialHealth", "momentum")
+
+
+def _f(v: Any) -> float | None:
+    """Plain float or None (NaN / missing -> None, as the scorecard expects)."""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return x if np.isfinite(x) else None
+
+
+def _ratio(a: Any, b: Any, positive_denominator: bool = True) -> float | None:
+    x, y = _f(a), _f(b)
+    if x is None or y is None or y == 0 or (positive_denominator and y < 0):
+        return None
+    return x / y
+
+
+def _growth(cur: Any, prev: Any) -> float | None:
+    c, p = _f(cur), _f(prev)
+    if c is None or p is None or p == 0:
+        return None
+    return (c - p) / abs(p)  # same definition as stock_analysis._growth
+
+
+def stock_inputs(sym: str, row: pd.Series, ctx: Context) -> dict[str, Any]:
+    """The `stock` dict score_business expects, from one point-in-time fundamentals row."""
+    d = ctx.data
+    t = ctx.t
+    price = _f(d.close.at[t, sym]) if sym in d.close.columns else None
+    ma50 = _f(d.ma50.at[t, sym]) if sym in d.ma50.columns and t in d.ma50.index else None
+    ma200 = _f(d.ma200.at[t, sym]) if sym in d.ma200.columns and t in d.ma200.index else None
+    equity = _f(row.get("equity"))
+    profile = {
+        "symbol": sym,
+        "sector": d.sectors.get(sym),
+        "industry": d.industries.get(sym),
+        "marketCap": _f(ctx.market_cap.get(sym)),
+    }
+    income = {
+        k: _f(row.get(k))
+        for k in ("revenue", "interestIncome", "interestExpense", "netInterestIncome", "netIncome")
+    }
+    balance = {
+        "totalAssets": _f(row.get("totalAssets")),
+        "totalStockholdersEquity": equity,
+        "totalDebt": _f(row.get("totalDebt")),
+        "netReceivables": _f(row.get("netReceivables")),
+        "accountPayables": _f(row.get("accountPayables")),
+    }
+    rf_annual = float(d.rf.get(t, 0.0)) * 12
+    bm = classify(profile, income, balance, risk_free_rate=rf_annual)
+    interest = _f(row.get("interestExpense"))
+    coverage = _ratio(row.get("operatingIncome"), interest) if interest and interest > 0 else None
+    return {
+        "symbol": sym,
+        "companyName": d.names.get(sym, sym),
+        "price": price,
+        "businessModel": bm.kind,
+        "captiveFinance": bm.captive_finance,
+        "profitability": {
+            "returnOnEquity": _ratio(row.get("netIncome"), equity),
+            "netProfitMargin": _ratio(row.get("netIncome"), row.get("revenue")),
+        },
+        "growth": {
+            "revenueGrowthYoY": _growth(row.get("revenue"), row.get("prevRevenue")),
+            "netIncomeGrowthYoY": _growth(row.get("netIncome"), row.get("prevNetIncome")),
+        },
+        "leverage": {
+            "totalEquity": equity,
+            "equityToAssets": _ratio(equity, row.get("totalAssets")),
+            "currentRatio": _ratio(row.get("totalCurrentAssets"), row.get("totalCurrentLiabilities")),
+            "debtToEquityRatio": _ratio(row.get("totalDebt"), equity, positive_denominator=False),
+            "interestCoverageRatio": coverage,
+        },
+        "technical": {"priceAvg50": ma50, "priceAvg200": ma200},
+    }
+
+
+def scores_at(ctx: Context) -> pd.DataFrame:
+    """Scorecard for every eligible stock at ctx.t (memoised per date on ctx.data):
+    columns = the four dimension scores, composite, rating, businessModel, fiscal period used."""
+    key = ("scorecard", ctx.t)
+    memo = ctx.data.memo
+    if key in memo:
+        return memo[key]
+    f = _full_year(ctx.fundamentals.reindex(ctx.universe))  # part-year stubs aren't annual results
+    rows = []
+    for sym, row in f.iterrows():
+        try:
+            dims, composite, rating = score_business(stock_inputs(str(sym), row, ctx))
+        except Exception as exc:  # one bad company never kills a rebalance
+            logger.warning("Scorecard failed for %s at %s: %s", sym, ctx.t.date(), exc)
+            continue
+        if composite is None:
+            continue
+        rows.append(
+            {
+                "symbol": sym,
+                **{k: dims[k]["score"] for k in DIMENSIONS},
+                "composite": composite,
+                "rating": rating,
+                "fiscalPeriod": pd.Timestamp(row["periodEnd"]).strftime("%Y-%m"),
+                "dimensionsScored": sum(dims[k]["score"] is not None for k in DIMENSIONS),
+            }
+        )
+    out = pd.DataFrame(rows).set_index("symbol") if rows else pd.DataFrame(columns=["composite", "rating"])
+    memo[key] = out
+    return out
+
+
+def _tiebreak(ctx: Context, idx: pd.Index) -> pd.Series:
+    """Banded scores tie often; break ties by point-in-time market cap (larger first), a
+    deterministic, disclosed rule that doesn't depend on symbol order."""
+    cap = ctx.market_cap.reindex(idx).fillna(0.0)
+    return cap.rank(pct=True) * 1e-3
+
+
+def _eligible(sc: pd.DataFrame, min_dims: int) -> pd.DataFrame:
+    # a composite resting on one dimension (e.g. momentum only) isn't a fundamental view
+    return sc[sc["dimensionsScored"] >= min_dims] if not sc.empty else sc
+
+
+def scorecard_top(ctx: Context) -> pd.Series:
+    """Highest composite fundamental score (needs >= 3 of 4 dimensions)."""
+    sc = _eligible(scores_at(ctx), 3)
+    if sc.empty:
+        return pd.Series(dtype=float)
+    return sc["composite"].astype(float) + _tiebreak(ctx, sc.index)
+
+
+def scorecard_buy(ctx: Context) -> pd.Series:
+    """Every stock the scorecard rates Buy or Strong Buy (composite >= the Buy band)."""
+    buy = next(th for th, r in SCORE_RATING_BANDS if r == "Buy")
+    sc = _eligible(scores_at(ctx), 3)
+    sc = sc[sc["composite"] >= buy] if not sc.empty else sc
+    if sc.empty:
+        return pd.Series(dtype=float)
+    return sc["composite"].astype(float) + _tiebreak(ctx, sc.index)
+
+
+def scorecard_value(ctx: Context) -> pd.Series:
+    """Buy-rated on fundamentals AND cheaper than the universe median on earnings yield.
+    Two SEPARATE tests (rating vs valuation are never blended, CLAUDE.md): the score ranks,
+    the E/P screen filters. USD reporters only for the E/P test (currency rule)."""
+    top = scorecard_buy(ctx)
+    if top.empty:
+        return top
+    f = _usd_reporting(_full_year(ctx.fundamentals.reindex(ctx.universe)))
+    ep = (f["netIncome"] / ctx.market_cap.reindex(f.index)).replace([np.inf, -np.inf], np.nan).dropna()
+    if ep.empty:
+        return pd.Series(dtype=float)
+    cheap = set(ep[ep >= ep.median()].index)
+    return top[[s for s in top.index if s in cheap]]

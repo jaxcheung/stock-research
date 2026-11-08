@@ -50,7 +50,12 @@ def run_lab(
     include_controls: bool = True,
     placebo_seeds: int = BACKTEST_PLACEBO_SEEDS,
     record_trials: bool = True,
+    rebalance_every: int = 1,
+    top_n: int | None = None,
+    keep_weights: bool = False,
 ) -> LabReport:
+    """rebalance_every / top_n apply to every strategy in the suite (and are part of each trial's
+    identity in the ledger); keep_weights retains holdings for the portfolio simulator."""
     unknown = [s for s in strategies if s not in STRATEGIES]
     if unknown:
         raise ValueError(f"Unknown strategies {unknown}; choose from {sorted(STRATEGIES)}")
@@ -80,8 +85,21 @@ def run_lab(
     results: dict[str, BacktestResult] = {}
     for n in names:
         logger.info("Backtesting %s", n)
-        results[n] = run_backtest(STRATEGIES[n], data, start=start, end=end, cost_bps=cost_bps)
-    params = {"start": start, "end": end, "costBps": cost_bps, "benchmark": bench}
+        results[n] = run_backtest(
+            STRATEGIES[n],
+            data,
+            start=start,
+            end=end,
+            cost_bps=cost_bps,
+            top_n=top_n,
+            keep_weights=keep_weights,
+            rebalance_every=rebalance_every,
+        )
+    params: dict[str, Any] = {"start": start, "end": end, "costBps": cost_bps, "benchmark": bench}
+    if rebalance_every != 1:
+        params["rebalanceEvery"] = rebalance_every  # omitted at the default: earlier trial keys stay valid
+    if top_n is not None:
+        params["topN"] = top_n
     tried = [n for n in results if n not in NON_TRIALS and n != bench]
     ledger = trials.load()
     keys = {trials.trial_key(n, params) for n in tried}
