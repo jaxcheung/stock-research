@@ -146,10 +146,15 @@ Built incrementally, starting cheap:
   A metric enters a template only if FMP Starter supports it correctly: the REIT FFO proxy was
   withdrawn (FMP's "other income" nets interest expense; impairments, sale gains and discontinued
   operations aren't separable — BXP/MAC growth had the wrong sign, RYN a 120% FFO margin), and the
-  ROE-only insurer template over-weighted insurers ~3x. REITs are scored on CASH (dividend
-  coverage = operating cash flow ÷ dividends; CFO and dividend per share growth; net debt ex leases
-  ÷ cash EBITDA = CFO + interest, which impairments and sale gains can't move). Insurers are scored
-  on equity EX AOCI (ROE and 3-year ROE, book value per share growth, debt/capital). New bands are
+  ROE-only insurer template over-weighted insurers ~3x. REITs are scored on CASH: quality is
+  UNSCORED by design (NOI margin / same-store / AFFO unavailable; dividend coverage measures payout
+  policy — as "quality" it rewarded dividend cuts), growth = revenue + operating cash flow per share,
+  health = net debt ex leases ÷ cash EBITDA (CFO + interest), its interest cover, and dividend
+  coverage as a payout-SAFETY test (no reward above ~1.3x). A ±50% CFO/share jump (one-off receipt)
+  or a >50% dividend jump (special) makes the affected metrics n/m; dividend-per-share growth is not
+  scored. Insurers are scored on COMMON equity ex AOCI ex preferred (ROE + 3-year ROE, BVPS growth,
+  debt/capital); life insurers have their own template (no revenue growth) and debt/capital band
+  (`<metric>@<band_key>` band overrides). A partial scorecard (< 3 of 4 dimensions) is "Not rated". New bands are
   quantile-calibrated on the industry's fundamentals (p10/25/50/75/90 → 20/40/60/80/100), never on
   returns. Every metric is checked against company-reported figures for 10+ names before it ships.
   Insurance brokers are operating companies (`standard`). A live scorecard with < 3 of 4
@@ -367,7 +372,7 @@ mechanics only — it cannot detect universe/survivorship look-ahead, and must s
       rebalancing, liquidity screen, alpha vs equal-weight universe; Portfolio simulator tab.
 - [x] Industry scoring templates v1 (2026-11-08): template engine; bank template (ROE, ROA,
       efficiency ratio, net revenue + EPS growth, equity/assets); REIT template (cash-based) and
-      insurer template (ex-AOCI) in v2 the same day; insurance brokers as operating companies; template section in the research
+      insurer templates (ex-AOCI; separate life template) in v2 the same day; insurance brokers as operating companies; template section in the research
       report, template panel + display-only extra indicators on the Research Report page; Industry
       Comparison uses the scorecard's net-revenue rule. Next: continuing-operations net income for
       ROE/ROA, non-bank lender bands, trust banks, more industries, then the analyst agent.

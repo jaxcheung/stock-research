@@ -96,7 +96,7 @@ def analyze_stock(symbol: str, client: FMPClient | None = None, years: int = 5) 
         model.subtype,
         model.captive_finance,
     )
-    template = template_for(model.kind, model.captive_finance)
+    template = template_for(model.kind, model.captive_finance, model.subtype)
     prior_ni = prior_income.get("netIncome")
 
     revenue_history = [
@@ -130,6 +130,7 @@ def analyze_stock(symbol: str, client: FMPClient | None = None, years: int = 5) 
         "businessModel": model.kind,
         "businessModelReason": model.reason,
         "captiveFinance": model.captive_finance,
+        "businessSubtype": model.subtype,
         "businessModelOverride": model.override,
         "metrics": metrics,
         "template": describe(template),

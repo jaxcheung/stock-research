@@ -118,6 +118,7 @@ def stock_inputs(sym: str, row: pd.Series, ctx: Context) -> dict[str, Any]:
         "totalCurrentLiabilities": _f(row.get("totalCurrentLiabilities")),
         "cashAndCashEquivalents": _f(row.get("cash")),
         "accumulatedOtherComprehensiveIncomeLoss": _f(row.get("aoci")),
+        "preferredStock": _f(row.get("pref")),
     }
     # newest first, exactly as the live path passes them (templates.compute_metrics)
     has_prior = prior["revenue"] is not None or prior["netIncome"] is not None
@@ -128,10 +129,12 @@ def stock_inputs(sym: str, row: pd.Series, ctx: Context) -> dict[str, Any]:
             {
                 "totalStockholdersEquity": _f(row.get("prevEquity")),
                 "accumulatedOtherComprehensiveIncomeLoss": _f(row.get("prevAoci")),
+                "preferredStock": _f(row.get("prevPref")),
             },
             {
                 "totalStockholdersEquity": _f(row.get("prev2Equity")),
                 "accumulatedOtherComprehensiveIncomeLoss": _f(row.get("prev2Aoci")),
+                "preferredStock": _f(row.get("prev2Pref")),
             },
         ],
         [
@@ -161,6 +164,7 @@ def stock_inputs(sym: str, row: pd.Series, ctx: Context) -> dict[str, Any]:
         "price": price,
         "businessModel": bm.kind,
         "captiveFinance": bm.captive_finance,
+        "businessSubtype": bm.subtype,
         "metrics": metrics,
         "profitability": {"returnOnEquity": v["roe"], "netProfitMargin": v["netMargin"]},
         "growth": {
