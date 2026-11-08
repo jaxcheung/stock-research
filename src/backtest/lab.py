@@ -23,6 +23,7 @@ from src.config import (
     BACKTEST_MIN_EVAL_MONTHS,
     BACKTEST_MIN_UNIVERSE,
     BACKTEST_PLACEBO_SEEDS,
+    BACKTEST_TOP_N,
     STATS_SIGNIFICANCE_LEVEL,
 )
 from src.utils.logging import get_logger
@@ -98,8 +99,8 @@ def run_lab(
     params: dict[str, Any] = {"start": start, "end": end, "costBps": cost_bps, "benchmark": bench}
     if rebalance_every != 1:
         params["rebalanceEvery"] = rebalance_every  # omitted at the default: earlier trial keys stay valid
-    if top_n is not None:
-        params["topN"] = top_n
+    if top_n is not None and top_n != BACKTEST_TOP_N:
+        params["topN"] = top_n  # the default is omitted: the same configuration is ONE trial
     tried = [n for n in results if n not in NON_TRIALS and n != bench]
     ledger = trials.load()
     keys = {trials.trial_key(n, params) for n in tried}
