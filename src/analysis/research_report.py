@@ -227,7 +227,10 @@ def _identify_risks(report: dict[str, Any]) -> list[str]:
         label = "Net revenue" if growth.get("revenueBasis") == "net of interest expense" else "Revenue"
         risks.append(f"{label} declined {abs(growth['revenueGrowthYoY']):.1%} YoY.")
     if growth["netIncomeGrowthYoY"] is not None and growth["netIncomeGrowthYoY"] < 0:
-        risks.append(f"Net income declined {abs(growth['netIncomeGrowthYoY']):.1%} YoY.")
+        if growth.get("priorNetIncomeNonPositive"):
+            risks.append(f"Net loss widened {abs(growth['netIncomeGrowthYoY']):.1%} YoY.")
+        else:
+            risks.append(f"Net income declined {abs(growth['netIncomeGrowthYoY']):.1%} YoY.")
 
     if profitability["netProfitMargin"] is not None and profitability["netProfitMargin"] < 0:
         risks.append("Currently unprofitable (negative net margin).")
@@ -432,8 +435,11 @@ def render_research_report(
         for row in history:
             base = row.get("netRevenue") if net_rows else row.get("revenue")
             margin = row["netIncome"] / base if base and row.get("netIncome") is not None else None
-            margin_str = f"{margin:.1%}" if margin is not None else "n/a"
-            mid = f" {money(row.get('netRevenue'), ccy)} |" if net_rows else ""
+            margin_str = f"{margin:.1%}" if margin is not None else ("n/m" if net_rows else "n/a")
+            if net_rows and row.get("netRevenue") is None:
+                mid = " n/m (FMP presentation not gross) |"
+            else:
+                mid = f" {money(row.get('netRevenue'), ccy)} |" if net_rows else ""
             lines.append(
                 f"| {row['date']} | {money(row.get('revenue'), ccy)} |{mid} {money(row.get('netIncome'), ccy)} | {margin_str} |"
             )

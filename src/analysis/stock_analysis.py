@@ -91,7 +91,13 @@ def analyze_stock(symbol: str, client: FMPClient | None = None, years: int = 5) 
         {
             "date": row.get("date"),
             "revenue": row.get("revenue"),
-            "netRevenue": scorecard_revenue(row, model.kind, model.subtype),
+            # only years FMP reports GROSS get a net figure; others are None (shown as n/m), never
+            # a reported figure presented as "net" (TFC FY2024)
+            "netRevenue": (
+                net
+                if (net := scorecard_revenue(row, model.kind, model.subtype)) != row.get("revenue")
+                else None
+            ),
             "netIncome": row.get("netIncome"),
         }
         for row in income
