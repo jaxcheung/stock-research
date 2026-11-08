@@ -291,6 +291,10 @@ def _identify_risks(report: dict[str, Any]) -> list[str]:
 def _executive_summary(report: dict[str, Any], target: ValuationSummary, valuation_verdict: str) -> list[str]:
     stock, score = report["stock"], report["score"]
     bullets = [f"**Fundamental quality: {score['rating']}** — composite score {score['compositeScore']}/100."]
+    if score.get("partial"):
+        bullets.append(
+            f"⚠️ Partial scorecard — only {score['scoredDimensions']} of 4 dimensions scored; the rating is indicative."
+        )
     bullets.append(
         f"**Valuation: {valuation_verdict}** (see price target below) — a separate question from quality."
     )

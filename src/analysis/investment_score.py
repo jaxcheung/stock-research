@@ -210,6 +210,7 @@ def rank_opportunities(
                 "companyName": result["companyName"],
                 "compositeScore": result["compositeScore"],
                 "rating": result["rating"],
+                "partialScorecard": result["partial"],  # < 3 of 4 dimensions: not comparable with full ones
                 "valuationScore": result["valuation"]["score"],
                 "valuationVerdict": result["valuation"]["detail"].get("verdict"),
                 "valuationPrecision": result["valuation"]["detail"].get("precision"),
@@ -223,6 +224,7 @@ def rank_opportunities(
         "companyName",
         "compositeScore",
         "rating",
+        "partialScorecard",
         "valuationScore",
         "valuationVerdict",
         "valuationPrecision",
