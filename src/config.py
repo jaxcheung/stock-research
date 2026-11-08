@@ -409,14 +409,17 @@ SCORECARD_TEMPLATES: dict[str, dict[str, Any]] = {
         },
         "why": "Life insurers are judged on common equity EXCLUDING accumulated other comprehensive income (unrealised "
         "bond marks) and preferred stock: ROE this year and over three years, growth in book value per share, and "
-        "financial leverage. Bands are calibrated on life insurers only (lower ROE and higher leverage than P&C are "
-        "normal). Revenue growth is not scored: pension-risk-transfer premiums and currency make it lumpy.",
+        "financial leverage. Debt/capital has a life-specific band (higher leverage than P&C is normal); ROE and "
+        "book-value bands are shared because life and P&C distributions match. Revenue growth is not scored: "
+        "pension-risk-transfer premiums and currency make it lumpy.",
         "valuation": ["ROE-adjusted peer P/B", "DCF not applicable"],
         "display": ["roe", "financialLeverage", "debtToCapital", "pb", "dividendYield"],
         "unavailable": [
             "Risk-based capital (RBC) / solvency ratio — debt ÷ capital is a leverage measure, not solvency",
             "Embedded value, new-business margin, operating vs capital/operating debt split",
             "Operating earnings ex investment gains and notable items",
+            "Preferred stock where FMP reports 0 (MET, PRU): it stays inside 'common' equity; FMP totalDebt may "
+            "include reserve-financing facilities (PRI)",
         ],
     },
     "insurer": {
@@ -585,7 +588,9 @@ REIT_DIVIDEND_JUMP = 0.5
 #   6 = REITs: quality unscored by design; growth revenue + CFO/share; health leverage, cover and
 #       dividend-coverage safety, with one-off-CFO and special-dividend guards. Insurers: common
 #       equity ex AOCI ex preferred; separate life template + bands (2026-11-08)
-SCORECARD_RULES_VERSION = 6
+#   7 = review fixes: CFO guard on upward jumps only (SLG's collapse stays scored); SPG-type
+#       dividend misfiling uses the total (2026-11-08)
+SCORECARD_RULES_VERSION = 7
 BACKTEST_LIQUIDITY_WINDOW = 63
 # Random-pick placebo: this many seeds, GROSS of costs, judged against the equal-weight universe.
 # Expect about 5% of seeds "significant" at the 5% level; materially more means a biased pipeline.

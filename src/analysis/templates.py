@@ -216,17 +216,23 @@ def compute_metrics(
     return m
 
 
-def _dividends(c: dict[str, Any]) -> float | None:
-    """Dividends paid (positive), the LARGER of FMP's common line and total-less-preferred. FMP
-    misfiles some lines (O FY2024 common = 0; SPG FY2025 $2.8bn of $3.2bn as "preferred") and no
-    threshold separates a misfiling from genuine preferred (VNO 31%, PEB 90%). Taking the larger
-    estimate errs towards a LOWER dividend coverage — the conservative direction for a payout-safety
-    test. Dividend-per-share GROWTH is not scored: specials and variable policies (PSA, RYN, WY, HST)
-    make it unreliable."""
+def _dividends(c: dict[str, Any], prior: dict[str, Any] | None = None) -> float | None:
+    """Dividends paid (positive): the larger of FMP's common line and total-less-preferred. FMP
+    misfiles some lines (O FY2024 common = 0) and no single threshold separates a misfiling from
+    genuine preferred (VNO 31%, PEB 90%). One misfiling pattern is detectable: SPG FY2025 files
+    $2.8bn of a $3.2bn payout as "preferred", so common collapses to $0.4bn while the TOTAL keeps
+    rising — when the estimate falls below half of last year's common dividends while total
+    dividends did not fall, the total is used. Dividend-per-share GROWTH is not scored: specials
+    and variable policies (PSA, RYN, WY, HST) make it unreliable."""
     common = abs(_f(c.get("commonDividendsPaid")) or 0.0)
     net = abs(_f(c.get("netDividendsPaid")) or 0.0)
     pref = abs(_f(c.get("preferredDividendsPaid")) or 0.0)
     d = max(common, net - pref)
+    if prior:
+        p_est = _dividends(prior)
+        p_net = abs(_f(prior.get("netDividendsPaid")) or 0.0)
+        if p_est and d < 0.5 * p_est and net >= p_net > 0:
+            d = net  # common filed as "preferred" (SPG FY2025)
     return d if d > 0 else None
 
 
@@ -245,24 +251,27 @@ def _reit_metrics(
     inflated by gains. Leverage is debt EXCLUDING leases over CASH EBITDA (operating cash flow +
     interest), which impairments and sale gains can't move (CCI FY2024 6.2x vs −20x on operating
     income; BXP FY2025 8.0x vs a gain-flattered 5.3x).
-    Guards: a year where operating cash flow per share moves more than ±CFO_JUMP is a one-off
-    receipt (VNO FY2025 +140%) — every CFO-based metric is n/m; a dividend up more than DIV_JUMP is
-    likely a special (PSA FY2022, RYN FY2025) — coverage is n/m."""
+    Guards: operating cash flow per share UP more than REIT_CFO_JUMP is a one-off receipt (VNO
+    FY2025 +140%) — every CFO-based metric is n/m (a fall is scored: it is real); a dividend up more
+    than REIT_DIVIDEND_JUMP is likely a special (PSA FY2022) — coverage is n/m. Smaller specials
+    (RYN FY2025 +45%) are not caught."""
     v = m.values
     cfo, pcfo = (
         _f(cf.get("netCashProvidedByOperatingActivities")),
         _f(pcf.get("netCashProvidedByOperatingActivities")),
     )
-    div, pdiv = _dividends(cf), _dividends(pcf)
+    div, pdiv = _dividends(cf, pcf), _dividends(pcf)
     sh, psh = _f(inc.get("weightedAverageShsOutDil")), _f(pri.get("weightedAverageShsOutDil"))
     cps, pcps = _ratio(cfo, sh), _ratio(pcfo, psh)
-    jump = cps is not None and pcps is not None and pcps > 0 and abs(cps / pcps - 1) > REIT_CFO_JUMP
+    # UPWARD jumps only: a one-off receipt flatters every CFO metric; a collapse is real news (SLG
+    # FY2025: CFO/share −73%, dividend coverage 0.31x) and must stay visible
+    jump = cps is not None and pcps is not None and pcps > 0 and cps / pcps - 1 > REIT_CFO_JUMP
     interest = _f(inc.get("interestExpense"))
     ebitda = cfo + interest if cfo is not None and interest is not None and interest > 0 else None
     cash = _f(bal.get("cashAndCashEquivalents")) or 0.0
     debt = financing_debt(bal) if bal.get("totalDebt") is not None else None
     if jump:
-        note = "n/m (operating cash flow per share moved more than ±50% — one-off receipt suspected)"
+        note = "n/m (operating cash flow per share up more than 50% — one-off receipt suspected)"
         for k in ("cfoPerShareGrowth", "cfoDividendCoverage", "netDebtToCashEbitda", "cashEbitdaCoverage"):
             v[k] = None
             m.notes[k] = note
@@ -291,7 +300,9 @@ def _insurer_metrics(
     v = m.values
 
     def eq_x(b: dict[str, Any]) -> float | None:
-        """COMMON equity ex AOCI: preferred stock is not the common holders' (MET ~$3.8bn)."""
+        """COMMON equity ex AOCI: preferred stock is not the common holders'. Only where FMP fills
+        preferredStock (ALL, LNC, EQH, CRBG) — FMP reports 0 for MET and PRU, whose preferred stays
+        in (disclosed in the template); ROE uses total net income, not income to common."""
         e = _f(b.get("totalStockholdersEquity"))
         if e is None or e == 0:
             return None
