@@ -15,7 +15,7 @@ from src.analysis import timeseries as ts
 from src.backtest import trials
 from src.backtest.data import BacktestData, load_backtest_data
 from src.backtest.engine import BacktestResult, run_backtest
-from src.backtest.evaluate import EvaluationReport, evaluate, sharpe_annual
+from src.backtest.evaluate import EvaluationReport, evaluate, sharpe_annual, vs_benchmark
 from src.backtest.strategies import CONTROLS, NON_TRIALS, STRATEGIES, make_placebo, universe_at
 from src.config import (
     BACKTEST_BENCHMARK,
@@ -135,6 +135,8 @@ def run_lab(
             a = (results[n].returns - b).dropna()
             if len(a) >= BACKTEST_MIN_EVAL_MONTHS:
                 trials.record(n, params, sharpe_annual(a.to_numpy(dtype=float)), len(a))
+    if rebalance_every > 1:
+        _anchor_range(ev, results, data, tried, bench, start, end, cost_bps, top_n, rebalance_every)
     placebo: dict[str, Any] = {}
     if placebo_seeds and "universe_ew" in results:
         placebo = run_placebo(
@@ -151,6 +153,59 @@ def run_lab(
     for r in results.values():
         ev.caveats.extend(f"{r.strategy}: {n}" for n in r.notes)
     return LabReport(results, ev, notes, placebo)
+
+
+def _anchor_range(
+    ev: EvaluationReport,
+    results: dict[str, BacktestResult],
+    data: BacktestData,
+    tried: list[str],
+    bench: str,
+    start: str | None,
+    end: str | None,
+    cost_bps: float,
+    top_n: int | None,
+    k: int,
+) -> None:
+    """With a k-month cadence, WHICH months trade is a free choice that moves results by several
+    points. Re-run every tried strategy at all k anchors (same window) and report the spread, so
+    the default anchor is never presented as the result when it is just one draw."""
+    b = results[bench].returns
+    rows: list[str] = []
+    for n in tried:
+        cagrs, alphas = [], []
+        for a in range(k):
+            r = (
+                results[n]
+                if a == 0
+                else run_backtest(
+                    STRATEGIES[n],
+                    data,
+                    start=start,
+                    end=end,
+                    cost_bps=cost_bps,
+                    top_n=top_n,
+                    rebalance_every=k,
+                    anchor=a,
+                )
+            ).returns.dropna()
+            cagrs.append(float(np.prod(1 + r.to_numpy(dtype=float)) ** (12 / len(r)) - 1))
+            vb = vs_benchmark(r, b, data.rf)
+            alphas.append(float(vb.get("alphaAnnual", np.nan)))
+        c = np.asarray(cagrs)
+        rank = int((c > c[0]).sum()) + 1  # rank of the default anchor, 1 = best
+        ev.table.loc[n, "cagrAnchorMin"] = float(c.min())
+        ev.table.loc[n, "cagrAnchorMedian"] = float(np.median(c))
+        ev.table.loc[n, "cagrAnchorMax"] = float(c.max())
+        ev.table.loc[n, "alphaAnchorMedian"] = float(np.nanmedian(alphas))
+        rows.append(
+            f"{n} {c.min():.1%}–{c.max():.1%} (median {np.median(c):.1%}; the default anchor ranks {rank} of {k})"
+        )
+    if rows:
+        ev.findings.append(
+            f"Rebalance-anchor sensitivity (every {k} months — CAGR across all {k} possible trading months, same "
+            "window): " + "; ".join(rows) + ". Judge the median, not the default anchor."
+        )
 
 
 def run_placebo(
@@ -199,6 +254,7 @@ def run_placebo(
     k = int((tab["alphaP"] < STATS_SIGNIFICANCE_LEVEL).sum())
     p_binom = float(stats.binom.sf(k - 1, len(tab), STATS_SIGNIFICANCE_LEVEL)) if k else 1.0
     biased = p_binom < 0.01
+    borderline = not biased and p_binom < 0.05
     finding = (
         f"Placebo: {len(tab)} random-pick portfolios (gross of costs) vs the equal-weight universe — median alpha "
         f"{np.median(tab['alphaAnnual']):+.1%}/yr, {k} of {len(tab)} ({frac:.0%}) significant at "
@@ -206,6 +262,9 @@ def run_placebo(
         + (
             "MORE than chance: the weighting/return mechanics are biased; do not trust other results."
             if biased
+            else "BORDERLINE — slightly more than chance; the HAC t-test over-rejects at this sample size (about "
+            "7–9% of placebos look significant at 5%), so this is weak evidence of bias. This checks"
+            if borderline
             else "consistent with chance. This checks the engine's weighting and return mechanics only: random "
             "picks and the reference share one universe, so it CANNOT detect survivorship or selection look-ahead."
         )

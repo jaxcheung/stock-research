@@ -396,6 +396,9 @@ def _methodology(benchmark: str, test_fraction: float, rebalance_every: int = 1)
         "strategy at a time does not reset the count) and for skew/kurtosis. Controls are not counted as trials.",
         "Placebo: many random-pick portfolios (different seeds), gross of costs, regressed on the equal-weight "
         "universe. About 5% should look 'significant' by chance; materially more flags a biased pipeline.",
+        "Test size: on ~100 months the HAC alpha t-test over-rejects — about 7–9% of zero-alpha random-pick "
+        "portfolios look significant at 5% (measured on 200–300 placebo seeds). Treat p-values near 0.05 as weaker "
+        "than they look.",
         "95% confidence intervals by stationary block bootstrap (6-month blocks, 2,000 resamples, fixed seed).",
         f"Walk-forward: the last {test_fraction:.0%} of months are held out; the strategy with the best in-sample "
         "Sharpe is selected and judged only on the held-out months.",

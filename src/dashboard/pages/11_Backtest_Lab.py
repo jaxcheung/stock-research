@@ -242,7 +242,17 @@ def _simulator_tab() -> None:
             ),
             Kpi("Sharpe", f"{row['sharpe']:.2f}", f"SPY {brow['sharpe']:.2f}"),
             Kpi("Max drawdown", f"{row['maxDrawdown']:.0%}", f"SPY {brow['maxDrawdown']:.0%}"),
-            Kpi("CAGR", f"{row['cagr']:.1%}", f"SPY {brow['cagr']:.1%}"),
+            Kpi(
+                "CAGR",
+                f"{row['cagr']:.1%}",
+                f"SPY {brow['cagr']:.1%}"
+                + (
+                    f" · other rebalance months {row['cagrAnchorMin']:.1%}–{row['cagrAnchorMax']:.1%} "
+                    f"(median {row['cagrAnchorMedian']:.1%})"
+                    if pd.notna(row.get("cagrAnchorMedian"))
+                    else ""
+                ),
+            ),
             Kpi(
                 "Final value",
                 f"${end_v:,.0f}",

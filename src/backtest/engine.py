@@ -146,6 +146,7 @@ def run_backtest(
     top_n: int | None = None,
     keep_weights: bool = False,
     rebalance_every: int = 1,
+    anchor: int = 0,
 ) -> BacktestResult:
     """rebalance_every: trade every k-th month-end (1 = monthly, 3 = quarterly, 12 = annually);
     in between, positions drift with the market and nothing is traded."""
@@ -153,6 +154,8 @@ def run_backtest(
         raise ValueError(f"cost_bps must be >= 0, got {cost_bps}")
     if rebalance_every not in (1, 3, 6, 12):
         raise ValueError(f"rebalance_every must be 1, 3, 6 or 12 months, got {rebalance_every}")
+    if not 0 <= anchor < rebalance_every:
+        raise ValueError(f"anchor must be in [0, {rebalance_every}), got {anchor}")
     lo = pd.Timestamp(start) if start else None
     hi = pd.Timestamp(end) if end else None
     dates = pd.DatetimeIndex(
@@ -173,7 +176,8 @@ def run_backtest(
     thin_signal: list[str] = []
     cap_cash: list[str] = []
     for i, (t, t_next) in enumerate(zip(dates[:-1], dates[1:], strict=True)):
-        if i % rebalance_every != 0:
+        # trade in the first month (to invest) and then every k-th month counted from `anchor`
+        if i != 0 and (i - anchor) % rebalance_every != 0:
             # hold: no trades, no costs; positions drift with next month's returns
             r_hold = data.returns.loc[t_next].reindex(prev.index)
             missing += int(r_hold.isna().sum())
