@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from src.analysis.business_model import classify
+from src.analysis.business_model import classify, scorecard_revenue
 from src.analysis.data_quality import check_statements, latest_complete_balance
 from src.analysis.dcf import live_risk_free_rate
 from src.data.fmp_client import FMPClient, FMPError
@@ -12,9 +12,12 @@ logger = get_logger("stock_analysis")
 
 
 def _growth(current: float | None, prior: float | None) -> float | None:
-    if current is None or prior in (None, 0):
+    """Year-on-year growth; n/m (None) when the prior year is zero or NEGATIVE — 'growth' from a
+    loss (losses narrowing, returning to profit) isn't growth and reached the top band (EOG FY2017,
+    8.6% of backtest top-50 picks)."""
+    if current is None or prior is None or prior <= 0:
         return None
-    return (current - prior) / abs(prior)
+    return (current - prior) / prior
 
 
 def analyze_stock(symbol: str, client: FMPClient | None = None, years: int = 5) -> dict[str, Any]:
@@ -81,6 +84,15 @@ def analyze_stock(symbol: str, client: FMPClient | None = None, years: int = 5) 
     total_assets = latest_bs.get("totalAssets")
     equity_to_assets = total_equity / total_assets if total_equity is not None and total_assets else None
 
+    # Banks / broker-dealers / card lenders: revenue net of interest expense (scorecard_revenue)
+    rev_now = scorecard_revenue(latest_income, model.kind, model.subtype)
+    rev_prior = scorecard_revenue(prior_income, model.kind, model.subtype) if prior_income else None
+    net_basis = rev_now is not None and rev_now != latest_income.get("revenue")
+    net_margin = latest_ratios.get("netProfitMargin")
+    if net_basis and rev_now and latest_income.get("netIncome") is not None:
+        net_margin = float(latest_income["netIncome"]) / rev_now
+    prior_ni = prior_income.get("netIncome")
+
     revenue_history = [
         {"date": row.get("date"), "revenue": row.get("revenue"), "netIncome": row.get("netIncome")}
         for row in income
@@ -112,14 +124,16 @@ def analyze_stock(symbol: str, client: FMPClient | None = None, years: int = 5) 
         "profitability": {
             "grossProfitMargin": latest_ratios.get("grossProfitMargin"),
             "operatingProfitMargin": latest_ratios.get("operatingProfitMargin"),
-            "netProfitMargin": latest_ratios.get("netProfitMargin"),
+            "netProfitMargin": net_margin,
             "returnOnEquity": latest_metrics.get("returnOnEquity"),
             "returnOnAssets": latest_metrics.get("returnOnAssets"),
             "returnOnInvestedCapital": latest_metrics.get("returnOnInvestedCapital"),
         },
         "growth": {
-            "revenueGrowthYoY": _growth(latest_income.get("revenue"), prior_income.get("revenue")),
-            "netIncomeGrowthYoY": _growth(latest_income.get("netIncome"), prior_income.get("netIncome")),
+            "revenueGrowthYoY": _growth(rev_now, rev_prior),
+            "netIncomeGrowthYoY": _growth(latest_income.get("netIncome"), prior_ni),
+            "revenueBasis": "net of interest expense" if net_basis else "reported",
+            "priorNetIncomeNonPositive": prior_ni is not None and prior_ni <= 0,
         },
         "leverage": {
             "currentRatio": latest_ratios.get("currentRatio"),

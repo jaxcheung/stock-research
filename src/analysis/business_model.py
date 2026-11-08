@@ -39,6 +39,7 @@ from src.config import (
     DCF_CAPTIVE_DEBT_WEIGHT,
     DCF_RISK_FREE_RATE,
     LENDER_INTEREST_INCOME_SHARE,
+    PLAIN_PB_SUBTYPES,
     UNMAPPED_INTEREST_SHARE,
     UNMAPPED_LENDER_RECEIVABLES_SHARE,
 )
@@ -94,6 +95,40 @@ def interest_income_share(income: dict[str, Any] | None) -> float | None:
     return float(ii) / float(revenue)
 
 
+def scorecard_revenue(income: dict[str, Any] | None, kind: str, subtype: str | None = None) -> float | None:
+    """Revenue on the basis the industry reports it. FMP's revenue for banks, broker-dealers and card
+    lenders is GROSS (interest income + non-interest income), so in rising-rate years it grows with
+    the deposit/funding cost it never keeps (JPM FY2023 +54% gross vs +21% net; 87% of banks got the
+    top growth band). Net revenue = revenue − interest expense ties to company-reported figures (JPM
+    $155bn, BAC $98.6bn, GS $46.3bn, AXP $60.5bn, COF $36.8bn). Applied only when interest income is
+    clearly a component of revenue; BDCs and mortgage REITs (total investment income / net interest
+    presentation) are left as reported."""
+    if not income:
+        return None
+    revenue = income.get("revenue")
+    if revenue is None:
+        return None
+    if kind not in ("bank", "lender", "broker_dealer") or subtype in PLAIN_PB_SUBTYPES:
+        return float(revenue)
+    ii, ie = income.get("interestIncome") or 0.0, income.get("interestExpense") or 0.0
+    if ii > 0 and ie > 0 and revenue >= 0.98 * ii and revenue - ie > 0:
+        return float(revenue) - float(ie)
+    return float(revenue)
+
+
+def financing_debt(balance: dict[str, Any] | None) -> float:
+    """Debt EXCLUDING lease liabilities. Lease cost runs through operating expense (rent), not
+    interest expense, so lease-heavy companies (MGM: $25.2bn of $31.6bn 'debt' is the VICI leases)
+    showed a near-zero 'cost of debt' and were flagged as captive finance."""
+    if not balance:
+        return 0.0
+    debt = balance.get("totalDebt") or 0.0
+    leases = (balance.get("capitalLeaseObligationsCurrent") or 0.0) + (
+        balance.get("capitalLeaseObligationsNonCurrent") or 0.0
+    )
+    return max(0.0, float(debt) - float(leases))
+
+
 def receivables_share(balance: dict[str, Any] | None) -> float | None:
     if not balance:
         return None
@@ -113,7 +148,7 @@ def _captive(
     assets = balance.get("totalAssets") or 0.0
     recv = balance.get("netReceivables") or 0.0
     payables = balance.get("accountPayables") or 0.0
-    debt, cap = balance.get("totalDebt") or 0.0, profile.get("marketCap") or 0.0
+    debt, cap = financing_debt(balance), profile.get("marketCap") or 0.0
     if assets > 0 and recv > 0:
         net_share = (recv - payables) / assets
         if net_share >= CAPTIVE_NET_RECEIVABLES_SHARE and debt >= CAPTIVE_DEBT_TO_RECEIVABLES * recv:

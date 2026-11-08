@@ -127,10 +127,15 @@ def _score_growth(stock: dict[str, Any]) -> dict[str, Any]:
     score = round(sum(valid_scores) / len(valid_scores)) if valid_scores else None
 
     notes = []
+    net_basis = g.get("revenueBasis") == "net of interest expense"
     if g["revenueGrowthYoY"] is not None:
-        notes.append(f"revenue growth {g['revenueGrowthYoY']:.1%} YoY")
+        notes.append(f"{'net ' if net_basis else ''}revenue growth {g['revenueGrowthYoY']:.1%} YoY")
+    if net_basis:
+        notes.append("revenue net of interest expense (FMP reports it gross)")
     if g["netIncomeGrowthYoY"] is not None:
         notes.append(f"net income growth {g['netIncomeGrowthYoY']:.1%} YoY")
+    elif g.get("priorNetIncomeNonPositive"):
+        notes.append("net income growth n/m (prior-year loss)")
     return {"score": score, "rationale": ", ".join(notes) if notes else "Insufficient data", "detail": g}
 
 

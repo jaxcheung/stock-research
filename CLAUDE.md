@@ -119,6 +119,12 @@ Built incrementally, starting cheap:
     beyond → "low precision" range. One method within the band → "(single method)". In both
     of those, the score is capped to `VALUATION_SCORE_CAP`. One method beyond the band →
     "Indicative only", unscored. Strong valuation scores need corroboration.
+  - Scorecard revenue (`business_model.scorecard_revenue`, live AND point-in-time): banks,
+    broker-dealers and card lenders are measured on revenue NET of interest expense — FMP reports it
+    gross (interest income + non-interest income), which gave 87% of banks the top growth band in
+    FY2023 (11% on net); BDCs / mortgage REITs stay as reported. Growth from a zero or negative base
+    is n/m ("prior-year loss"), never the top band. The captive-finance tests use debt EXCLUDING
+    lease liabilities (`financing_debt`: MGM's VICI leases made a 1% "cost of debt").
   - Scorecard: banks/lenders/broker-dealers are scored on equity ÷ assets; insurers'
     financial health is not scored (separate-account assets make equity/assets meaningless;
     RBC/combined ratio unavailable); negative equity makes D/E and ROE "n/m"; captive
