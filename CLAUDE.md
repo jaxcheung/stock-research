@@ -133,8 +133,8 @@ Built incrementally, starting cheap:
   - `SCORECARD_RULES_VERSION` is part of each scorecard trial's ledger key: bump it on any rule change.
 - **Industry scoring templates are the single answer to "which indicators judge this company"**
   (`src/analysis/templates.py`, definitions + bands in `config.SCORECARD_TEMPLATES` /
-  `SCORECARD_METRIC_BANDS`). A template per business model (general, banks, lenders &
-  broker-dealers; REITs and insurers on labelled INTERIM rules) names the scored metrics per dimension, dimensions unscored by design
+  `SCORECARD_METRIC_BANDS`). A template per business model (general, banks, REITs, insurers,
+  lenders & broker-dealers) names the scored metrics per dimension, dimensions unscored by design
   (with the reason), display indicators, valuation methods, and the industry metrics FMP Starter
   lacks (CET1, combined ratio, AFFO, same-store NOI, ...) — those are listed as unavailable, never
   proxied silently. `compute_metrics` takes plain FMP-named statement dicts so the live scorecard
@@ -146,8 +146,14 @@ Built incrementally, starting cheap:
   A metric enters a template only if FMP Starter supports it correctly: the REIT FFO proxy was
   withdrawn (FMP's "other income" nets interest expense; impairments, sale gains and discontinued
   operations aren't separable — BXP/MAC growth had the wrong sign, RYN a 120% FFO margin), and the
-  ROE-only insurer template over-weighted insurers ~3x. Insurance brokers are operating companies
-  (`standard`). A live scorecard with < 3 of 4 dimensions scored is reported as PARTIAL.
+  ROE-only insurer template over-weighted insurers ~3x. REITs are scored on CASH (dividend
+  coverage = operating cash flow ÷ dividends; CFO and dividend per share growth; net debt ex leases
+  ÷ cash EBITDA = CFO + interest, which impairments and sale gains can't move). Insurers are scored
+  on equity EX AOCI (ROE and 3-year ROE, book value per share growth, debt/capital). New bands are
+  quantile-calibrated on the industry's fundamentals (p10/25/50/75/90 → 20/40/60/80/100), never on
+  returns. Every metric is checked against company-reported figures for 10+ names before it ships.
+  Insurance brokers are operating companies (`standard`). A live scorecard with < 3 of 4
+  dimensions scored is reported as PARTIAL.
   - Scorecard: banks/lenders/broker-dealers are scored on equity ÷ assets; insurers'
     financial health is not scored (separate-account assets make equity/assets meaningless;
     RBC/combined ratio unavailable); negative equity makes D/E and ROE "n/m"; captive
@@ -360,12 +366,11 @@ mechanics only — it cannot detect universe/survivorship look-ahead, and must s
       rebuilt point-in-time and backtested (top-N, all-Buy, Buy + E/P screen), monthly to annual
       rebalancing, liquidity screen, alpha vs equal-weight universe; Portfolio simulator tab.
 - [x] Industry scoring templates v1 (2026-11-08): template engine; bank template (ROE, ROA,
-      efficiency ratio, net revenue + EPS growth, equity/assets); REITs and insurers on labelled
-      interim rules; insurance brokers as operating companies; template section in the research
+      efficiency ratio, net revenue + EPS growth, equity/assets); REIT template (cash-based) and
+      insurer template (ex-AOCI) in v2 the same day; insurance brokers as operating companies; template section in the research
       report, template panel + display-only extra indicators on the Research Report page; Industry
-      Comparison uses the scorecard's net-revenue rule. Next: REIT and insurer redesign on data FMP
-      supports (lease-excluded leverage on operating income + D&A; book-value growth, multi-year
-      ROE, debt/capital), then more industries and the analyst agent.
+      Comparison uses the scorecard's net-revenue rule. Next: continuing-operations net income for
+      ROE/ROA, non-bank lender bands, trust banks, more industries, then the analyst agent.
 - [ ] News integration into reports (news endpoint exists in `fmp_client.py`,
       not yet wired into analysis output or the dashboard).
 - [x] Quant Lab (2026-11-05): source-agnostic series loader (FRED incl. keyless

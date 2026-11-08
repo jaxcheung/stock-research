@@ -269,6 +269,45 @@ SCORECARD_METRIC_BANDS: dict[str, dict[str, Any]] = {
         "mode": "lower",
         "bands": [(0.50, 100), (0.55, 80), (0.62, 60), (0.68, 40), (0.78, 20), (float("inf"), 0)],
     },
+    # REITs (cash-based, see templates._reit_metrics); quantile-calibrated on FY2022-25 REITs
+    # (p10/p25/median/p75/p90 -> 20/40/60/80/100), fundamentals only, not returns
+    "cfoDividendCoverage": {
+        "mode": "higher",
+        "bands": [(2.4, 100), (1.9, 80), (1.55, 60), (1.35, 40), (1.15, 20), (float("-inf"), 0)],
+    },
+    "cfoPerShareGrowth": {
+        "mode": "higher",
+        "bands": [(0.20, 100), (0.11, 80), (0.04, 60), (-0.03, 40), (-0.12, 20), (float("-inf"), 0)],
+    },
+    "dividendPerShareGrowth": {
+        "mode": "higher",
+        "bands": [(0.25, 100), (0.11, 80), (0.04, 60), (0.0, 40), (-0.03, 20), (float("-inf"), 0)],
+    },
+    "netDebtToCashEbitda": {
+        "mode": "lower",
+        "bands": [(3.25, 100), (4.6, 80), (5.4, 60), (6.3, 40), (7.5, 20), (float("inf"), 0)],
+    },
+    "cashEbitdaCoverage": {
+        "mode": "higher",
+        "bands": [(8.5, 100), (6.1, 80), (4.8, 60), (3.9, 40), (2.9, 20), (float("-inf"), 0)],
+    },
+    # insurers (equity ex AOCI, see templates._insurer_metrics); same quantile calibration
+    "roeExAoci": {
+        "mode": "higher",
+        "bands": [(0.21, 100), (0.16, 80), (0.12, 60), (0.07, 40), (0.01, 20), (float("-inf"), 0)],
+    },
+    "roe3yExAoci": {
+        "mode": "higher",
+        "bands": [(0.22, 100), (0.15, 80), (0.12, 60), (0.08, 40), (0.045, 20), (float("-inf"), 0)],
+    },
+    "bvpsGrowthExAoci": {
+        "mode": "higher",
+        "bands": [(0.19, 100), (0.14, 80), (0.08, 60), (0.02, 40), (-0.035, 20), (float("-inf"), 0)],
+    },
+    "debtToCapitalExAoci": {
+        "mode": "lower",
+        "bands": [(0.12, 100), (0.18, 80), (0.23, 60), (0.30, 40), (0.36, 20), (float("inf"), 0)],
+    },
 }
 
 SCORECARD_TEMPLATES: dict[str, dict[str, Any]] = {
@@ -323,53 +362,52 @@ SCORECARD_TEMPLATES: dict[str, dict[str, Any]] = {
         ],
     },
     "reit": {
-        # INTERIM: the general rules (unchanged from before templates). A REIT-specific template needs
-        # NAREIT FFO, which FMP Starter can't reconstruct: impairments, property-sale gains and
-        # discontinued operations aren't separable, and "other income" nets interest expense — a
-        # proxy built from them produced wrong-direction FFO growth (BXP, MAC) and a 120% FFO
-        # margin (RYN). Redesign pending (see CLAUDE.md milestones).
-        "label": "REITs (interim: general rules)",
+        "label": "REITs",
         "kinds": ["reit"],
         "dimensions": {
-            "quality": ["roe", "netMargin"],
-            "growth": ["revenueGrowth", "netIncomeGrowth"],
-            "financialHealth": ["currentRatio", "debtToEquity", "interestCoverage"],
+            "quality": ["cfoDividendCoverage"],
+            "growth": ["cfoPerShareGrowth", "dividendPerShareGrowth"],
+            "financialHealth": ["netDebtToCashEbitda", "cashEbitdaCoverage"],
         },
-        "why": "Interim: REITs are scored on the general rules. GAAP earnings understate REITs (real-estate "
-        "depreciation), so quality and growth here are conservative; a REIT template based on FFO needs data "
-        "FMP Starter does not provide.",
-        "valuation": ["Peer P/FFO (approximate FFO = net income + D&A)", "DCF not applicable"],
-        "display": ["ffoMargin", "pFfo", "dividendYield", "payoutRatio", "debtToAssets", "netDebtToEbitda"],
+        "why": "REITs are judged on CASH, because GAAP earnings are understated by real-estate depreciation and FMP "
+        "Starter can't rebuild NAREIT FFO. Quality is how well operating cash flow covers the dividend (REITs must "
+        "pay out most of their income); growth is operating cash flow and dividends per share; health is net debt "
+        "excluding lease liabilities over cash EBITDA (operating cash flow + interest), and its cover of interest — "
+        "measures impairments and gains on sale can't move. Operating "
+        "cash flow tracks reported FFO/AFFO for most REITs and can't be inflated by gains on sale.",
+        "valuation": [
+            "Peer P/FFO (approximate FFO = net income + D&A — includes gains)",
+            "DCF not applicable",
+        ],
+        "display": ["dividendYield", "payoutRatio", "debtToAssets", "netDebtToEbitda", "pFfo"],
         "unavailable": [
-            "NAREIT FFO / AFFO (impairments, gains on sale, discontinued operations not separable)",
+            "NAREIT FFO / AFFO (impairments, gains on sale, discontinued operations not separable) — operating cash "
+            "flow used instead; it misses joint-venture income (SPG, WELL read low)",
             "Same-store NOI growth, occupancy, lease expiries",
             "Net asset value (NAV) per share",
-            "EBITDAre and lease-adjusted leverage",
+            "Pro-rata (joint-venture) debt and EBITDAre",
         ],
     },
     "insurer": {
-        # INTERIM: the pre-template insurer rules. The ROE-only / EPS-growth template over-weighted
-        # insurers 3x in the picks (hard P&C market, catastrophe recoveries, equity mark-to-market).
-        # Redesign pending: book-value-per-share growth, multi-year ROE, debt/capital.
-        "label": "Insurers (interim rules)",
+        "label": "Insurers",
         "kinds": ["insurer"],
         "dimensions": {
-            "quality": ["roe", "netMargin"],
-            "growth": ["revenueGrowth", "netIncomeGrowth"],
+            "quality": ["roeExAoci", "roe3yExAoci"],
+            "growth": ["revenueGrowth", "bvpsGrowthExAoci"],
+            "financialHealth": ["debtToCapitalExAoci"],
         },
-        "unscored": {
-            "financialHealth": "not scored for insurers — solvency metrics (RBC ratio, combined ratio) are not "
-            "available on FMP Starter, and equity ÷ assets is distorted by separate-account assets",
-        },
-        "why": "Interim rules: return on equity and net margin, revenue and earnings growth. An insurer-specific "
-        "template (book value growth, multi-year ROE, debt/capital) is pending.",
+        "why": "Insurers are judged on equity EXCLUDING accumulated other comprehensive income (unrealised bond and "
+        "equity marks), as insurers and rating agencies report it. Quality is ROE this year and over three years "
+        "(smoothing catastrophe years and investment marks); growth is revenue (premiums and investment income) and "
+        "book value per share; financial health is financial leverage (debt ÷ capital). Net margin is not "
+        "comparable between life and P&C business.",
         "valuation": ["ROE-adjusted peer P/B", "DCF not applicable"],
         "display": ["roe", "financialLeverage", "debtToCapital", "pb", "dividendYield"],
         "unavailable": [
             "Combined ratio, loss ratio, reserve development (P&C)",
-            "Risk-based capital (RBC) / solvency ratio",
+            "Risk-based capital (RBC) / solvency ratio — debt ÷ capital is a leverage measure, not solvency",
             "Embedded value, new-business margin (life)",
-            "Earnings ex investment mark-to-market (equity-heavy insurers: BRK, MKL)",
+            "Operating earnings ex investment gains (equity-heavy insurers BRK, MKL: 3-year ROE only smooths it)",
         ],
     },
     "lender_broker": {
@@ -505,7 +543,10 @@ BACKTEST_SCORECARD_MIN_GROWTH_COVERAGE = 0.8
 #   4 = bank template (ROE, ROA, efficiency ratio, net revenue + EPS growth, equity/assets);
 #       insurance brokers scored as operating companies; REITs and insurers on interim
 #       (pre-template) rules (2026-11-08)
-SCORECARD_RULES_VERSION = 4
+#   5 = REIT template (cash-based: dividend coverage, CFO + dividend per share growth, lease-
+#       excluded leverage) and insurer template (ROE + 3y ROE, revenue + BVPS growth, debt/capital,
+#       all on equity ex AOCI) (2026-11-08)
+SCORECARD_RULES_VERSION = 5
 BACKTEST_LIQUIDITY_WINDOW = 63
 # Random-pick placebo: this many seeds, GROSS of costs, judged against the equal-weight universe.
 # Expect about 5% of seeds "significant" at the 5% level; materially more means a biased pipeline.

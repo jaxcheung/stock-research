@@ -7,12 +7,13 @@
 # statement dicts (FMP field names), so the live scorecard (stock_analysis) and the point-in-time
 # backtest (backtest/scorecard) run the same code. Pure: no I/O.
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 
-from src.analysis.business_model import revenue_pair, scorecard_revenue, yoy_growth
+from src.analysis.business_model import financing_debt, revenue_pair, scorecard_revenue, yoy_growth
 from src.config import SCORECARD_METRIC_BANDS, SCORECARD_TEMPLATES
 
 # metric key -> (label, format) ; format "pct" | "x" (multiple) | "ratio"
@@ -28,6 +29,15 @@ METRICS: dict[str, tuple[str, str]] = {
     "equityToAssets": ("equity/assets", "pct"),
     "roa": ("ROA", "pct"),
     "efficiencyRatio": ("efficiency ratio", "pct"),
+    "cfoDividendCoverage": ("dividend coverage (operating cash flow ÷ dividends)", "x"),
+    "cfoPerShareGrowth": ("operating cash flow per share growth", "pct"),
+    "dividendPerShareGrowth": ("dividend per share growth", "pct"),
+    "netDebtToCashEbitda": ("net debt ex leases ÷ cash EBITDA (operating cash flow + interest)", "x"),
+    "cashEbitdaCoverage": ("cash EBITDA ÷ interest", "x"),
+    "roeExAoci": ("ROE ex AOCI", "pct"),
+    "roe3yExAoci": ("3-year ROE ex AOCI", "pct"),
+    "bvpsGrowthExAoci": ("book value per share growth ex AOCI", "pct"),
+    "debtToCapitalExAoci": ("debt/capital ex AOCI", "pct"),
 }
 
 
@@ -95,22 +105,24 @@ def _ratio(a: Any, b: Any, positive_denominator: bool = True) -> float | None:
     return x / y
 
 
+def _at(rows: Sequence[dict[str, Any] | None] | None, i: int) -> dict[str, Any]:
+    return (rows[i] or {}) if rows and len(rows) > i else {}
+
+
 def compute_metrics(
-    income: dict[str, Any] | None,
-    prior_income: dict[str, Any] | None,
-    balance: dict[str, Any] | None,
-    cashflow: dict[str, Any] | None,
-    prior_cashflow: dict[str, Any] | None,
+    incomes: Sequence[dict[str, Any] | None],
+    balances: Sequence[dict[str, Any] | None],
+    cashflows: Sequence[dict[str, Any] | None],
     kind: str,
     subtype: str | None = None,
     captive_finance: bool = False,
 ) -> MetricSet:
-    """Every template metric for one company-year, from FMP-named statement dicts. A metric that
-    is not meaningful is None with a note; one that is missing is just None."""
-    inc, pri, bal = income or {}, prior_income or {}, balance or {}
-    # cashflow / prior_cashflow: part of the interface for templates that need cash-flow items
-    # (none of the active templates do yet — the REIT FFO proxy was withdrawn)
-    del cashflow, prior_cashflow
+    """Every template metric for one company-year, from FMP-named statement dicts given NEWEST
+    FIRST ([0] = the year scored, [1] = prior full year, [2] = the one before; missing = {}).
+    A metric that is not meaningful is None with a note; one that is missing is just None."""
+    inc, pri, pri2 = _at(incomes, 0), _at(incomes, 1), _at(incomes, 2)
+    bal, pbal, pbal2 = _at(balances, 0), _at(balances, 1), _at(balances, 2)
+    cf, pcf = _at(cashflows, 0), _at(cashflows, 1)
     m = MetricSet()
     v = m.values
 
@@ -182,7 +194,91 @@ def compute_metrics(
         v["interestCoverage"] = _ratio(inc.get("operatingIncome"), interest)
     v["equityToAssets"] = _ratio(equity, assets)
 
+    _reit_metrics(m, inc, pri, bal, cf, pcf)
+    _insurer_metrics(m, inc, pri, pri2, bal, pbal, pbal2)
     return m
+
+
+def _dividends(c: dict[str, Any]) -> float | None:
+    """Common dividends paid (positive), from total (net) dividends less preferred. FMP misfiles
+    some lines: commonDividendsPaid is 0 for O FY2024, and SPG FY2025 shows $2.8bn of its $3.2bn
+    payout as "preferred". Preferred dividends are never most of a payout, so a preferred line
+    above 20% of the total is treated as misfiled and the total is used."""
+    net = abs(_f(c.get("netDividendsPaid")) or 0.0)
+    pref = abs(_f(c.get("preferredDividendsPaid")) or 0.0)
+    if net > 0:
+        return net - pref if pref <= 0.2 * net else net
+    common = abs(_f(c.get("commonDividendsPaid")) or 0.0)
+    return common if common > 0 else None
+
+
+def _reit_metrics(
+    m: MetricSet,
+    inc: dict[str, Any],
+    pri: dict[str, Any],
+    bal: dict[str, Any],
+    cf: dict[str, Any],
+    pcf: dict[str, Any],
+) -> None:
+    """REIT metrics on CASH figures FMP reports reliably — never an FFO reconstruction (FMP Starter
+    can't separate impairments, sale gains or discontinued operations; "other income" nets
+    interest). Operating cash flow tracks reported FFO/AFFO (O, AMT, EQIX, DLR, VICI within ~10%)
+    and can't be inflated by gains. Leverage is debt EXCLUDING leases over CASH EBITDA (operating
+    cash flow + interest), which impairments and sale gains can't move: operating income + D&A
+    read CCI FY2024 −20x (impairment) and BXP FY2025 5.3x (gain) vs reported ~5.9x / ~7.5x;
+    cash EBITDA gives 6.2x / 8.0x, O 5.9x, WELL 4.0x."""
+    v = m.values
+    cfo, pcfo = (
+        _f(cf.get("netCashProvidedByOperatingActivities")),
+        _f(pcf.get("netCashProvidedByOperatingActivities")),
+    )
+    div, pdiv = _dividends(cf), _dividends(pcf)
+    sh, psh = _f(inc.get("weightedAverageShsOutDil")), _f(pri.get("weightedAverageShsOutDil"))
+    v["cfoDividendCoverage"] = _ratio(cfo, div)
+    v["cfoPerShareGrowth"] = yoy_growth(_ratio(cfo, sh), _ratio(pcfo, psh))
+    v["dividendPerShareGrowth"] = yoy_growth(_ratio(div, sh), _ratio(pdiv, psh))
+    interest = _f(inc.get("interestExpense"))
+    ebitda = cfo + interest if cfo is not None and interest is not None and interest > 0 else None
+    cash = _f(bal.get("cashAndCashEquivalents")) or 0.0
+    debt = financing_debt(bal) if bal.get("totalDebt") is not None else None
+    v["netDebtToCashEbitda"] = _ratio(debt - cash, ebitda) if debt is not None else None
+    v["cashEbitdaCoverage"] = _ratio(ebitda, interest) if ebitda is not None and interest else None
+
+
+def _insurer_metrics(
+    m: MetricSet,
+    inc: dict[str, Any],
+    pri: dict[str, Any],
+    pri2: dict[str, Any],
+    bal: dict[str, Any],
+    pbal: dict[str, Any],
+    pbal2: dict[str, Any],
+) -> None:
+    """Insurer metrics on equity EXCLUDING AOCI (unrealised bond/equity marks), the basis insurers and
+    rating agencies use: MET's equity carries an $18bn AOCI loss, which halves reported equity and
+    doubles ROE and debt/capital. Multi-year ROE smooths catastrophe years and equity marks."""
+    v = m.values
+
+    def eq_x(b: dict[str, Any]) -> float | None:
+        e = _f(b.get("totalStockholdersEquity"))
+        if e is None or e == 0:
+            return None
+        return e - (_f(b.get("accumulatedOtherComprehensiveIncomeLoss")) or 0.0)
+
+    e0, e1, e2 = eq_x(bal), eq_x(pbal), eq_x(pbal2)
+    roes = [
+        _ratio(_f(i.get("netIncome")), e) if e is not None and e > 0 else None
+        for i, e in ((inc, e0), (pri, e1), (pri2, e2))
+    ]
+    v["roeExAoci"] = roes[0]
+    full = [r for r in roes if r is not None]
+    v["roe3yExAoci"] = sum(full) / 3 if len(full) == 3 else None  # needs all three years
+    sh, psh = _f(inc.get("weightedAverageShsOutDil")), _f(pri.get("weightedAverageShsOutDil"))
+    v["bvpsGrowthExAoci"] = yoy_growth(_ratio(e0, sh), _ratio(e1, psh))
+    debt = financing_debt(bal) if bal.get("totalDebt") is not None else None
+    v["debtToCapitalExAoci"] = (
+        _ratio(debt, debt + e0) if debt is not None and e0 is not None and e0 > 0 else None
+    )
 
 
 def _band(value: float | None, metric: str) -> int | None:
