@@ -214,6 +214,192 @@ SCORE_WEIGHTS = {
 # D/E and interest coverage are meaningless for deposit- or float-funded balance sheets).
 EQUITY_TO_ASSETS_BANDS = [(0.12, 100), (0.10, 80), (0.08, 60), (0.06, 30), (float("-inf"), 10)]
 
+# ---------------------------------------------------------------- scoring templates
+# One scoring template per business model (src/analysis/templates.py). A template says WHICH
+# metrics are scored in each scorecard dimension, which dimensions are unscored by design (and
+# why), which indicators to show, which valuation methods apply, and which industry metrics FMP
+# Starter does not provide. Live scorecard, research report, point-in-time backtest and (later)
+# AI agents all read the same template — no consumer picks its own indicators.
+#
+# Bands: (threshold, score). mode "higher": first threshold the value is >= wins (highest first).
+# mode "lower": first threshold the value is <= wins (lowest first). The generic bands are the
+# original scorecard's; the bank / REIT / insurer bands are calibrated so a typical company in
+# that industry lands mid-range (cross-section of FY2023-25 statements, not returns).
+SCORECARD_METRIC_BANDS: dict[str, dict[str, Any]] = {
+    # generic (original scorecard)
+    "roe": {
+        "mode": "higher",
+        "bands": [(0.20, 100), (0.15, 80), (0.10, 60), (0.05, 40), (0.0, 20), (float("-inf"), 0)],
+    },
+    "netMargin": {
+        "mode": "higher",
+        "bands": [(0.20, 100), (0.15, 80), (0.10, 60), (0.05, 40), (0.0, 20), (float("-inf"), 0)],
+    },
+    "revenueGrowth": {
+        "mode": "higher",
+        "bands": [(0.20, 100), (0.10, 80), (0.05, 60), (0.0, 40), (float("-inf"), 0)],
+    },
+    "netIncomeGrowth": {
+        "mode": "higher",
+        "bands": [(0.20, 100), (0.10, 80), (0.05, 60), (0.0, 40), (float("-inf"), 0)],
+    },
+    "epsGrowth": {
+        "mode": "higher",
+        "bands": [(0.20, 100), (0.10, 80), (0.05, 60), (0.0, 40), (float("-inf"), 0)],
+    },
+    "currentRatio": {"mode": "lower", "bands": [(0.75, 10), (1.0, 40), (1.5, 70), (float("inf"), 100)]},
+    "debtToEquity": {
+        "mode": "lower",
+        "bands": [(0.3, 100), (0.6, 80), (1.0, 60), (2.0, 40), (float("inf"), 10)],
+    },
+    "interestCoverage": {
+        "mode": "higher",
+        "bands": [(10, 100), (5, 80), (2, 60), (1, 30), (float("-inf"), 0)],
+    },
+    "equityToAssets": {"mode": "higher", "bands": EQUITY_TO_ASSETS_BANDS},
+    # banks: ROA (US bank median ~1.0-1.1%), efficiency ratio (median ~60%; lower is better)
+    "roa": {
+        "mode": "higher",
+        "bands": [(0.015, 100), (0.012, 80), (0.010, 60), (0.0075, 40), (0.005, 20), (float("-inf"), 0)],
+    },
+    "efficiencyRatio": {
+        "mode": "lower",
+        "bands": [(0.50, 100), (0.55, 80), (0.62, 60), (0.68, 40), (0.78, 20), (float("inf"), 0)],
+    },
+    # REITs: approximate FFO (net income + D&A) margin and yield on assets; leverage on EBITDA
+    "ffoMargin": {
+        "mode": "higher",
+        "bands": [(0.60, 100), (0.50, 80), (0.40, 60), (0.30, 40), (0.20, 20), (float("-inf"), 0)],
+    },
+    "ffoToAssets": {
+        "mode": "higher",
+        "bands": [(0.08, 100), (0.065, 80), (0.05, 60), (0.04, 40), (0.03, 20), (float("-inf"), 0)],
+    },
+    "ffoPerShareGrowth": {
+        "mode": "higher",
+        "bands": [(0.10, 100), (0.06, 80), (0.03, 60), (0.0, 40), (float("-inf"), 0)],
+    },
+    "netDebtToEbitda": {
+        "mode": "lower",
+        "bands": [(4.0, 100), (5.0, 80), (6.0, 60), (7.0, 40), (8.5, 20), (float("inf"), 0)],
+    },
+    "ebitdaCoverage": {
+        "mode": "higher",
+        "bands": [(7.0, 100), (5.5, 80), (4.0, 60), (3.0, 40), (2.0, 20), (float("-inf"), 0)],
+    },
+}
+
+SCORECARD_TEMPLATES: dict[str, dict[str, Any]] = {
+    "standard": {
+        "label": "General (operating companies)",
+        "kinds": ["standard", "asset_manager"],
+        "dimensions": {
+            "quality": ["roe", "netMargin"],
+            "growth": ["revenueGrowth", "netIncomeGrowth"],
+            "financialHealth": ["currentRatio", "debtToEquity", "interestCoverage"],
+        },
+        "why": "Operating businesses: returns on equity and margins, top- and bottom-line growth, "
+        "liquidity, leverage and debt service.",
+        "valuation": ["DCF (FCF, two-stage)", "Peer P/E (Σcap ÷ Σearnings)"],
+        "display": [
+            "grossMargin",
+            "operatingMargin",
+            "fcfMargin",
+            "roic",
+            "netDebtToEbitda",
+            "pe",
+            "evToEbitda",
+        ],
+        "unavailable": [],
+    },
+    "bank": {
+        "label": "Banks",
+        "kinds": ["bank"],
+        "dimensions": {
+            "quality": ["roe", "roa", "efficiencyRatio"],
+            "growth": ["revenueGrowth", "epsGrowth"],
+            "financialHealth": ["equityToAssets"],
+        },
+        "why": "Banks are balance-sheet businesses: profitability is ROE and ROA, cost discipline is the "
+        "efficiency ratio (operating expenses ÷ net revenue), growth is NET revenue (after interest "
+        "expense) and EPS, and capital strength is proxied by equity ÷ assets. Net margin, current ratio, "
+        "D/E and interest coverage are meaningless for a deposit-funded balance sheet.",
+        "valuation": ["ROE-adjusted peer P/B", "DCF not applicable (deposits are raw material, not capital)"],
+        "display": [
+            "netInterestShare",
+            "efficiencyRatio",
+            "roa",
+            "pTangibleBook",
+            "dividendYield",
+            "payoutRatio",
+        ],
+        "unavailable": [
+            "CET1 / Tier 1 capital ratio (regulatory filings, not in FMP Starter) — equity ÷ assets used instead",
+            "Net interest margin on average earning assets",
+            "Non-performing loans, net charge-offs, allowance coverage",
+            "Deposit mix and deposit beta",
+        ],
+    },
+    "reit": {
+        "label": "REITs",
+        "kinds": ["reit"],
+        "dimensions": {
+            "quality": ["ffoMargin", "ffoToAssets"],
+            "growth": ["revenueGrowth", "ffoPerShareGrowth"],
+            "financialHealth": ["netDebtToEbitda", "ebitdaCoverage"],
+        },
+        "why": "REIT earnings are understated by real-estate depreciation, so profitability and growth use "
+        "funds from operations (approximated as net income + D&A − positive non-operating income, so gains on "
+        "sale can't inflate it; JV income is excluded too, which understates JV-heavy REITs). Leverage "
+        "is measured the way REITs and their lenders do: net debt ÷ EBITDA and EBITDA ÷ interest.",
+        "valuation": ["Peer P/FFO", "DCF not applicable"],
+        "display": ["ffoMargin", "pFfo", "dividendYield", "payoutRatio", "debtToAssets", "netDebtToEbitda"],
+        "unavailable": [
+            "NAREIT FFO and AFFO (gains on sale / impairments not separable) — FFO is approximate",
+            "Same-store NOI growth, occupancy, lease expiries",
+            "Net asset value (NAV) per share",
+        ],
+    },
+    "insurer": {
+        "label": "Insurers",
+        "kinds": ["insurer"],
+        "dimensions": {
+            "quality": ["roe"],
+            "growth": ["revenueGrowth", "epsGrowth"],
+        },
+        "unscored": {
+            "financialHealth": "not scored for insurers — solvency metrics (RBC ratio, combined ratio) are not "
+            "available on FMP Starter, and equity ÷ assets is distorted by separate-account assets",
+        },
+        "why": "Insurers are judged on return on equity and growth in premiums and EPS. Net margin is not "
+        "comparable between life and P&C business, and solvency needs regulatory data FMP doesn't provide.",
+        "valuation": ["ROE-adjusted peer P/B", "DCF not applicable"],
+        "display": ["roe", "financialLeverage", "debtToCapital", "pb", "dividendYield"],
+        "unavailable": [
+            "Combined ratio, loss ratio, reserve development (P&C)",
+            "Risk-based capital (RBC) / solvency ratio",
+            "Embedded value, new-business margin (life)",
+        ],
+    },
+    "lender_broker": {
+        "label": "Lenders & broker-dealers",
+        "kinds": ["lender", "broker_dealer"],
+        "dimensions": {
+            "quality": ["roe"],
+            "growth": ["revenueGrowth", "netIncomeGrowth"],
+            "financialHealth": ["equityToAssets"],
+        },
+        "why": "Balance-sheet financials without a bank-specific template yet: ROE (margins aren't comparable "
+        "without cost of goods sold), net revenue and earnings growth, equity ÷ assets.",
+        "valuation": [
+            "ROE-adjusted peer P/B (plain P/B ≈ P/NAV for BDCs and mortgage REITs)",
+            "DCF not applicable",
+        ],
+        "display": ["roe", "roa", "equityToAssets", "pb", "dividendYield"],
+        "unavailable": ["Credit quality (charge-offs, non-accruals)", "Regulatory capital"],
+    },
+}
+
 # Peer P/B ROE adjustment safeguards: peers with negative TTM earnings are excluded from
 # the P/B and ROE aggregates; peer ROE must exceed long-run growth by at least this; and the
 # subject's ROE must lie within the range of peer ROEs (interpolation, not extrapolation —
@@ -323,7 +509,10 @@ BACKTEST_SCORECARD_MIN_GROWTH_COVERAGE = 0.8
 # new trial in the deflated Sharpe instead of silently replacing the old one.
 #   1 = original; 2 = net revenue for banks, growth-base rule, lease-excluded captive debt,
 #       ROE-only quality for bank-type models (2026-11-08)
-SCORECARD_RULES_VERSION = 2
+#   3 = industry templates (SCORECARD_TEMPLATES): banks (ROE, ROA, efficiency ratio, net revenue +
+#       EPS growth), REITs (FFO margin / yield, FFO-per-share growth, net debt/EBITDA, EBITDA
+#       coverage), insurers (ROE, revenue + EPS growth) (2026-11-08)
+SCORECARD_RULES_VERSION = 3
 BACKTEST_LIQUIDITY_WINDOW = 63
 # Random-pick placebo: this many seeds, GROSS of costs, judged against the equal-weight universe.
 # Expect about 5% of seeds "significant" at the 5% level; materially more means a biased pipeline.
@@ -610,15 +799,17 @@ INDUSTRY_INDICATOR_PROFILES: dict[str, dict[str, list[str] | str]] = {
         "return": [
             "roe",
             "roa",
-            "netMargin",
             "netInterestShare",
             "efficiencyRatio",
             "epsGrowth",
-            "revenueGrowth",
+            "netRevenueGrowth",
         ],
         "risk": ["equityToAssets", "financialLeverage", "incomeQuality", "volatility", "maxDrawdown", "beta"],
         "valuation": ["pe", "pb", "pTangibleBook", "dividendYield", "payoutRatio"],
         "not_meaningful": [
+            # gross revenue includes interest income; margins aren't comparable without COGS
+            "netMargin",
+            "revenueGrowth",
             "grossMargin",
             "operatingMargin",
             "ebitdaMargin",

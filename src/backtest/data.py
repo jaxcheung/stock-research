@@ -37,7 +37,8 @@ WITH raw AS (
     SELECT symbol, CAST(date AS DATE) AS periodEnd, reportedCurrency AS currency,
            coalesce(TRY_CAST(acceptedDate AS DATE), TRY_CAST(filingDate AS DATE)) AS filed,
            revenue, grossProfit, operatingIncome, netIncome, weightedAverageShsOutDil AS shares,
-           interestIncome, interestExpense, netInterestIncome
+           interestIncome, interestExpense, netInterestIncome,
+           epsDiluted, operatingExpenses, ebitda, totalOtherIncomeExpensesNet AS otherIncome
     FROM income_annual WHERE period = 'FY'
 ), r AS (
     -- fullYear is False only for a part-year period: one ending < 330 days after the previous
@@ -61,7 +62,8 @@ WITH raw AS (
     SELECT symbol, CAST(date AS DATE) AS periodEnd,
            totalAssets, totalStockholdersEquity AS equity, totalLiabilities, totalDebt,
            totalCurrentAssets, totalCurrentLiabilities, netReceivables, accountPayables,
-           capitalLeaseObligationsCurrent AS leasesCurrent, capitalLeaseObligationsNonCurrent AS leasesNonCurrent
+           capitalLeaseObligationsCurrent AS leasesCurrent, capitalLeaseObligationsNonCurrent AS leasesNonCurrent,
+           cashAndCashEquivalents AS cash
     FROM balance_annual WHERE period = 'FY'
 ), b1 AS (
     -- Stub balance rows (data_quality.is_stub_balance: equity AND liabilities zero with assets > 0,
@@ -75,7 +77,7 @@ WITH raw AS (
            lag(totalDebt) OVER w AS pTotalDebt, lag(totalCurrentAssets) OVER w AS pTCA,
            lag(totalCurrentLiabilities) OVER w AS pTCL, lag(netReceivables) OVER w AS pRecv,
            lag(accountPayables) OVER w AS pPay, lag(leasesCurrent) OVER w AS pLC,
-           lag(leasesNonCurrent) OVER w AS pLNC
+           lag(leasesNonCurrent) OVER w AS pLNC, lag(cash) OVER w AS pCash
     FROM b0 WINDOW w AS (PARTITION BY symbol ORDER BY periodEnd)
 ), b AS (
     SELECT symbol, periodEnd, balanceStub,
@@ -87,14 +89,17 @@ WITH raw AS (
            CASE WHEN balanceStub THEN pRecv ELSE netReceivables END AS netReceivables,
            CASE WHEN balanceStub THEN pPay ELSE accountPayables END AS accountPayables,
            CASE WHEN balanceStub THEN pLC ELSE leasesCurrent END AS leasesCurrent,
-           CASE WHEN balanceStub THEN pLNC ELSE leasesNonCurrent END AS leasesNonCurrent
+           CASE WHEN balanceStub THEN pLNC ELSE leasesNonCurrent END AS leasesNonCurrent,
+           CASE WHEN balanceStub THEN pCash ELSE cash END AS cash
     FROM b1
 ), c AS (
-    SELECT symbol, CAST(date AS DATE) AS periodEnd, freeCashFlow
+    SELECT symbol, CAST(date AS DATE) AS periodEnd, freeCashFlow,
+           depreciationAndAmortization AS da
     FROM cashflow_annual WHERE period = 'FY'
 ), j AS (
     SELECT i.*, coalesce(b.balanceStub, FALSE) AS balanceStub, b.totalAssets, b.equity, b.totalDebt, b.totalCurrentAssets, b.totalCurrentLiabilities,
-           b.netReceivables, b.accountPayables, b.leasesCurrent, b.leasesNonCurrent, c.freeCashFlow,
+           b.netReceivables, b.accountPayables, b.leasesCurrent, b.leasesNonCurrent, b.cash, c.freeCashFlow, c.da,
+           lag(i.epsDiluted) OVER w AS lagEps, lag(i.otherIncome) OVER w AS lagOther, lag(c.da) OVER w AS lagDa, lag(i.shares) OVER w AS lagShares,
            lag(i.revenue) OVER w AS lagRevenue, lag(i.netIncome) OVER w AS lagNetIncome,
            lag(i.interestIncome) OVER w AS lagInterestIncome, lag(i.interestExpense) OVER w AS lagInterestExpense,
            lag(i.netInterestIncome) OVER w AS lagNetInterestIncome, lag(i.periodEnd) OVER w AS lagPeriodEnd,
@@ -117,6 +122,15 @@ SELECT symbol, periodEnd, currency, fullYear, balanceStub,
             THEN lagInterestExpense END AS prevInterestExpense,
        CASE WHEN fullYear AND lagFullYear AND periodEnd - lagPeriodEnd BETWEEN 330 AND 400
             THEN lagNetInterestIncome END AS prevNetInterestIncome,
+       CASE WHEN fullYear AND lagFullYear AND periodEnd - lagPeriodEnd BETWEEN 330 AND 400
+            THEN lagEps END AS prevEps,
+       CASE WHEN fullYear AND lagFullYear AND periodEnd - lagPeriodEnd BETWEEN 330 AND 400
+            THEN lagDa END AS prevDa,
+       CASE WHEN fullYear AND lagFullYear AND periodEnd - lagPeriodEnd BETWEEN 330 AND 400
+            THEN lagShares END AS prevShares,
+       CASE WHEN fullYear AND lagFullYear AND periodEnd - lagPeriodEnd BETWEEN 330 AND 400
+            THEN lagOther END AS prevOtherIncome,
+       epsDiluted, operatingExpenses, ebitda, otherIncome, da, cash,
        leasesCurrent, leasesNonCurrent,
        interestIncome, interestExpense, netInterestIncome,
        totalAssets, equity, totalDebt, totalCurrentAssets, totalCurrentLiabilities,

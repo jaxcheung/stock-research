@@ -14,14 +14,13 @@ from typing import Any
 
 import pandas as pd
 
-from src.analysis.business_model import FINANCIAL_KINDS
 from src.analysis.dcf import run_dcf
 from src.analysis.relative_valuation import PeerValuation, peer_valuation
 from src.analysis.stock_analysis import analyze_stock
+from src.analysis.templates import MetricSet, score_dimensions, template_for
 from src.analysis.valuation_summary import summarize_valuation
 from src.config import (
     DEFAULT_MAX_PEERS,
-    EQUITY_TO_ASSETS_BANDS,
     SCORE_RATING_BANDS,
     SCORE_WEIGHTS,
     VALUATION_SCORE_CAP,
@@ -33,14 +32,6 @@ logger = get_logger("investment_score")
 
 # (threshold, score) bands, evaluated highest-threshold-first: value >= threshold wins.
 _UPSIDE_BANDS = [(0.25, 100), (0.15, 85), (0.05, 70), (0.0, 55), (-0.10, 35), (-0.25, 15), (float("-inf"), 0)]
-_MARGIN_BANDS = [(0.20, 100), (0.15, 80), (0.10, 60), (0.05, 40), (0.0, 20), (float("-inf"), 0)]
-_ROE_BANDS = [(0.20, 100), (0.15, 80), (0.10, 60), (0.05, 40), (0.0, 20), (float("-inf"), 0)]
-_GROWTH_BANDS = [(0.20, 100), (0.10, 80), (0.05, 60), (0.0, 40), (float("-inf"), 0)]
-_INTEREST_COVERAGE_BANDS = [(10, 100), (5, 80), (2, 60), (1, 30), (float("-inf"), 0)]
-
-# (threshold, score) bands, evaluated lowest-threshold-first: value <= threshold wins (lower is better).
-_DEBT_TO_EQUITY_BANDS = [(0.3, 100), (0.6, 80), (1.0, 60), (2.0, 40), (float("inf"), 10)]
-_CURRENT_RATIO_FLOOR_BANDS = [(0.75, 10), (1.0, 40), (1.5, 70), (float("inf"), 100)]
 
 
 def _band_score_higher_better(value: float | None, bands: list[tuple[float, int]]) -> int | None:
@@ -97,141 +88,6 @@ def _score_valuation(
     return {"score": score, "rationale": "; ".join(notes) if notes else "Insufficient data", "detail": detail}
 
 
-def _score_quality(stock: dict[str, Any]) -> dict[str, Any]:
-    p = stock["profitability"]
-    equity = stock["leverage"].get("totalEquity")
-    negative_equity = equity is not None and equity <= 0
-    roe = None if negative_equity else p["returnOnEquity"]  # ROE on negative equity is not meaningful
-    roe_score = _band_score_higher_better(roe, _ROE_BANDS)
-    # Banks / lenders / broker-dealers have no cost of goods sold: net margin on (net) revenue isn't
-    # comparable with an industrial's (87% of banks sat in the top band, median 28.6% vs 7.4%).
-    # Their quality is scored on ROE alone.
-    bank_type = stock.get("businessModel") in ("bank", "lender", "broker_dealer")
-    margin_score = None if bank_type else _band_score_higher_better(p["netProfitMargin"], _MARGIN_BANDS)
-
-    valid_scores = [s for s in (roe_score, margin_score) if s is not None]
-    score = round(sum(valid_scores) / len(valid_scores)) if valid_scores else None
-
-    notes = []
-    if negative_equity:
-        notes.append("ROE n/m (negative equity)")
-    elif p["returnOnEquity"] is not None:
-        notes.append(f"ROE {p['returnOnEquity']:.1%}")
-    if p["netProfitMargin"] is not None:
-        notes.append(
-            f"net margin {p['netProfitMargin']:.1%}"
-            + (" (shown, not scored for financials)" if bank_type else "")
-        )
-    return {"score": score, "rationale": ", ".join(notes) if notes else "Insufficient data", "detail": p}
-
-
-def _score_growth(stock: dict[str, Any]) -> dict[str, Any]:
-    g = stock["growth"]
-    revenue_score = _band_score_higher_better(g["revenueGrowthYoY"], _GROWTH_BANDS)
-    income_score = _band_score_higher_better(g["netIncomeGrowthYoY"], _GROWTH_BANDS)
-
-    valid_scores = [s for s in (revenue_score, income_score) if s is not None]
-    score = round(sum(valid_scores) / len(valid_scores)) if valid_scores else None
-
-    notes = []
-    net_basis = g.get("revenueBasis") == "net of interest expense"
-    if g["revenueGrowthYoY"] is not None:
-        notes.append(f"{'net ' if net_basis else ''}revenue growth {g['revenueGrowthYoY']:.1%} YoY")
-    if net_basis:
-        notes.append("revenue net of interest expense (FMP reports it gross)")
-    elif g.get("revenueBasis") == "changed between years":
-        notes.append("revenue growth n/m (FMP switched between gross and net presentation)")
-    if g["netIncomeGrowthYoY"] is not None:
-        notes.append(f"net income growth {g['netIncomeGrowthYoY']:.1%} YoY")
-    elif g.get("priorNetIncomeNonPositive"):
-        notes.append("net income growth n/m (prior-year loss)")
-    return {"score": score, "rationale": ", ".join(notes) if notes else "Insufficient data", "detail": g}
-
-
-def _score_financial_health(stock: dict[str, Any]) -> dict[str, Any]:
-    leverage = stock["leverage"]
-    if stock.get("businessModel") == "insurer":
-        # Life insurers' total assets include separate-account (policyholder) assets, so
-        # equity/assets is structurally low and says nothing about solvency (MET 3.8%).
-        # The right metrics (RBC ratio, combined ratio) aren't available on FMP Starter.
-        return {
-            "score": None,
-            "rationale": "not scored for insurers — solvency metrics (RBC ratio, combined ratio) unavailable",
-            "detail": leverage,
-        }
-    if stock.get("captiveFinance"):
-        # Consolidated current ratio, D/E and coverage all mix the finance arm's receivables,
-        # short-term funding and interest with the operating business (DE current ratio 2.31).
-        return {
-            "score": None,
-            "rationale": "not scored — captive-finance arm makes consolidated current ratio, D/E and "
-            "coverage not meaningful for the operating business",
-            "detail": leverage,
-        }
-    if stock.get("businessModel", "standard") in FINANCIAL_KINDS:
-        # Deposit-/float-funded: current ratio, D/E and interest coverage are meaningless
-        # (JPM scored 7/100 on them). Capital adequacy proxy: equity / total assets.
-        eta = leverage.get("equityToAssets")
-        score = _band_score_higher_better(eta, EQUITY_TO_ASSETS_BANDS)
-        return {
-            "score": score,
-            "rationale": (
-                f"equity/assets {eta:.1%} (financial: current ratio, D/E, coverage not applicable)"
-                if eta is not None
-                else "Insufficient data (equity/assets unavailable)"
-            ),
-            "detail": leverage,
-        }
-    equity = leverage.get("totalEquity")
-    negative_equity = equity is not None and equity <= 0
-    captive = bool(stock.get("captiveFinance"))
-    interest_coverage = leverage["interestCoverageRatio"]
-    # FMP reports exactly 0.0 (not null) when a company's interestExpense is
-    # itself reported as 0 (e.g. Apple nets interest income/expense) — that's
-    # a data gap, not a company with zero debt-service capacity, so treat it
-    # as missing rather than penalizing it as the worst possible score.
-    coverage_unreliable = interest_coverage == 0
-
-    current_ratio_score = _band_score_lower_better(leverage["currentRatio"], _CURRENT_RATIO_FLOOR_BANDS)
-    # Negative D/E (negative equity) must not land in the "lowest leverage" band (MCD scored 100).
-    # Negative equity or a captive finance arm (Ford Credit's debt in consolidated D/E) makes
-    # D/E not meaningful for the operating business.
-    debt_equity_score = (
-        None
-        if negative_equity or captive
-        else _band_score_lower_better(leverage["debtToEquityRatio"], _DEBT_TO_EQUITY_BANDS)
-    )
-    coverage_score = (
-        None
-        if coverage_unreliable or captive
-        else _band_score_higher_better(interest_coverage, _INTEREST_COVERAGE_BANDS)
-    )
-
-    valid_scores = [s for s in (current_ratio_score, debt_equity_score, coverage_score) if s is not None]
-    score = round(sum(valid_scores) / len(valid_scores)) if valid_scores else None
-
-    notes = []
-    if leverage["currentRatio"] is not None:
-        notes.append(f"current ratio {leverage['currentRatio']:.2f}")
-    if negative_equity:
-        notes.append("debt/equity n/m (negative equity)")
-    elif captive:
-        notes.append("debt/equity n/m (includes captive-finance debt)")
-    elif leverage["debtToEquityRatio"] is not None:
-        notes.append(f"debt/equity {leverage['debtToEquityRatio']:.2f}")
-    if captive:
-        notes.append("interest coverage n/m (finance-arm interest booked in cost of sales)")
-    elif coverage_unreliable:
-        notes.append("interest coverage data unreliable (near-zero reported interest expense)")
-    elif interest_coverage is not None:
-        notes.append(f"interest coverage {interest_coverage:.1f}x")
-    return {
-        "score": score,
-        "rationale": ", ".join(notes) if notes else "Insufficient data",
-        "detail": leverage,
-    }
-
-
 def _score_momentum(stock: dict[str, Any]) -> dict[str, Any]:
     price = stock["price"]
     tech = stock["technical"]
@@ -262,14 +118,22 @@ def _rating_from_score(score: float) -> str:
 
 
 def score_business(stock: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], float | None, str | None]:
-    """The fundamental-quality rule, shared by the live scorecard and the backtester: business
+    """The fundamental-quality rule, shared by the live scorecard and the backtester. Which metrics
+    are scored is decided by the company's industry TEMPLATE (templates.template_for); business
     dimensions only (valuation is reported alongside, never blended in), each banded, missing
     dimensions dropped and the remaining weights renormalised. Returns (dimensions, composite
     0-100 or None when nothing is scoreable, rating or None)."""
+    tpl = template_for(stock.get("businessModel", "standard"), bool(stock.get("captiveFinance")))
+    metrics = stock.get("metrics")
+    if not isinstance(metrics, MetricSet):
+        raise ValueError("stock['metrics'] missing: build it with templates.compute_metrics")
+    business = score_dimensions(tpl, metrics)
     dimensions = {
-        "quality": _score_quality(stock),
-        "growth": _score_growth(stock),
-        "financialHealth": _score_financial_health(stock),
+        "quality": business.get("quality", {"score": None, "rationale": "Insufficient data", "detail": {}}),
+        "growth": business.get("growth", {"score": None, "rationale": "Insufficient data", "detail": {}}),
+        "financialHealth": business.get(
+            "financialHealth", {"score": None, "rationale": "Insufficient data", "detail": {}}
+        ),
         "momentum": _score_momentum(stock),
     }
     scored = {name: d["score"] for name, d in dimensions.items() if d["score"] is not None}

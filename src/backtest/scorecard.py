@@ -22,8 +22,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from src.analysis.business_model import classify, revenue_pair, yoy_growth
+from src.analysis.business_model import classify, yoy_growth
 from src.analysis.investment_score import score_business
+from src.analysis.templates import compute_metrics
 from src.backtest.strategies import Context, _full_year, _usd_reporting
 from src.config import (
     BACKTEST_MIN_UNIVERSE,
@@ -91,48 +92,63 @@ def stock_inputs(sym: str, row: pd.Series, ctx: Context) -> dict[str, Any]:
     # static long-run rf assumption, not the T-bill of the day — with T-bills near 0 (2020-21) the
     # test can't fire and F/GM flipped between captive and standard with the rate regime.
     bm = classify(profile, income, balance, risk_free_rate=DCF_RISK_FREE_RATE)
-    # Same revenue basis as the live scorecard (net of interest expense for gross-reporting banks,
-    # broker-dealers and card lenders), for BOTH years so growth compares like with like.
+    # Exactly the live computation (templates.compute_metrics) on point-in-time statement dicts.
+    full_income = {
+        **income,
+        "operatingIncome": _f(row.get("operatingIncome")),
+        "epsDiluted": _f(row.get("epsDiluted")),
+        "operatingExpenses": _f(row.get("operatingExpenses")),
+        "ebitda": _f(row.get("ebitda")),
+        "weightedAverageShsOutDil": _f(row.get("shares")),
+        "totalOtherIncomeExpensesNet": _f(row.get("otherIncome")),
+    }
     prior = {
         "revenue": _f(row.get("prevRevenue")),
         "interestIncome": _f(row.get("prevInterestIncome")),
         "interestExpense": _f(row.get("prevInterestExpense")),
         "netInterestIncome": _f(row.get("prevNetInterestIncome")),
+        "netIncome": _f(row.get("prevNetIncome")),
+        "epsDiluted": _f(row.get("prevEps")),
+        "weightedAverageShsOutDil": _f(row.get("prevShares")),
+        "totalOtherIncomeExpensesNet": _f(row.get("prevOtherIncome")),
     }
-    rev, rev_prior, basis = revenue_pair(
-        income, prior if prior["revenue"] is not None else None, bm.kind, bm.subtype
+    full_balance = {
+        **balance,
+        "totalCurrentAssets": _f(row.get("totalCurrentAssets")),
+        "totalCurrentLiabilities": _f(row.get("totalCurrentLiabilities")),
+        "cashAndCashEquivalents": _f(row.get("cash")),
+    }
+    metrics = compute_metrics(
+        full_income,
+        prior if prior["revenue"] is not None or prior["netIncome"] is not None else None,
+        full_balance,
+        {"depreciationAndAmortization": _f(row.get("da"))},
+        {"depreciationAndAmortization": _f(row.get("prevDa"))},
+        bm.kind,
+        bm.subtype,
+        bm.captive_finance,
     )
-    net_basis = rev is not None and rev != income["revenue"]
-    prev_ni = _f(row.get("prevNetIncome"))
-    interest = _f(row.get("interestExpense"))
-    coverage = _ratio(row.get("operatingIncome"), interest) if interest and interest > 0 else None
+    v = metrics.values
     return {
         "symbol": sym,
         "companyName": d.names.get(sym, sym),
         "price": price,
         "businessModel": bm.kind,
         "captiveFinance": bm.captive_finance,
-        "profitability": {
-            "returnOnEquity": _ratio(row.get("netIncome"), equity),
-            "netProfitMargin": _ratio(row.get("netIncome"), rev),
-        },
+        "metrics": metrics,
+        "profitability": {"returnOnEquity": v["roe"], "netProfitMargin": v["netMargin"]},
         "growth": {
-            "revenueGrowthYoY": _growth(rev, rev_prior),
-            "netIncomeGrowthYoY": _growth(row.get("netIncome"), prev_ni),
-            # basis "mixed" wins: growth is n/m because FMP switched presentation between the years
-            "revenueBasis": "changed between years"
-            if basis == "mixed"
-            else "net of interest expense"
-            if net_basis
-            else "reported",
-            "priorNetIncomeNonPositive": prev_ni is not None and prev_ni <= 0,
+            "revenueGrowthYoY": v["revenueGrowth"],
+            "netIncomeGrowthYoY": v["netIncomeGrowth"],
+            "revenueBasis": metrics.revenue_basis,
+            "priorNetIncomeNonPositive": prior["netIncome"] is not None and prior["netIncome"] <= 0,
         },
         "leverage": {
             "totalEquity": equity,
-            "equityToAssets": _ratio(equity, row.get("totalAssets")),
-            "currentRatio": _ratio(row.get("totalCurrentAssets"), row.get("totalCurrentLiabilities")),
-            "debtToEquityRatio": _ratio(row.get("totalDebt"), equity, positive_denominator=False),
-            "interestCoverageRatio": coverage,
+            "equityToAssets": v["equityToAssets"],
+            "currentRatio": v["currentRatio"],
+            "debtToEquityRatio": v["debtToEquity"],
+            "interestCoverageRatio": v["interestCoverage"],
         },
         "technical": {"priceAvg50": ma50, "priceAvg200": ma200},
     }
