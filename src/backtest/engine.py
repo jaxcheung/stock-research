@@ -9,6 +9,7 @@
 #   counted in `missingReturns` (survivorship caveat: delisted names are not in the store).
 
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -104,7 +105,26 @@ def build_weights(scores: pd.Series, ctx: Context, strategy: Strategy, top_n: in
     if scores.empty:
         return pd.Series(dtype=float)
     n = len(scores) if strategy.hold_all else strategy.top_n or top_n or BACKTEST_TOP_N
-    picks = scores.sort_values(ascending=False).iloc[:n].index
+    ranked = scores.sort_values(ascending=False)
+    if strategy.kind == "stock" and not strategy.hold_all:
+        # Constrained selection: at most floor(cap × N) names per sector, best-ranked first, the rest
+        # filled from the next-ranked names in other sectors — equal weights then respect the sector
+        # cap without re-weighting (scaling 24 tech picks to 1.25% while the other 26 got 2.69% made
+        # the 49th-ranked non-tech name weigh twice the #1 tech name).
+        per_sector = max(1, int(BACKTEST_SECTOR_CAP * n + 1e-9))
+        sec = ctx.data.sectors.reindex(ranked.index).fillna("Unknown")
+        count: dict[str, int] = {}
+        chosen: list[Any] = []
+        for s in ranked.index:
+            k = str(sec.get(s))
+            if count.get(k, 0) < per_sector:
+                chosen.append(s)
+                count[k] = count.get(k, 0) + 1
+                if len(chosen) == n:
+                    break
+        picks = pd.Index(chosen)
+    else:
+        picks = ranked.iloc[:n].index
     if strategy.weighting == "inverse_vol":
         vol = ctx.history(12)[list(picks)].std(ddof=1).replace(0, np.nan)
         w = (1 / vol).dropna()

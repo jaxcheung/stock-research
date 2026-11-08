@@ -165,6 +165,7 @@ def evaluate(
     controls: tuple[str, ...] = (),
     test_fraction: float = BACKTEST_WALK_FORWARD_TEST_FRACTION,
     prior_trial_irs: list[float] | None = None,
+    rebalance_every: int = 1,
 ) -> EvaluationReport:
     """prior_trial_irs: information ratios of OTHER configurations tried before (trial ledger);
     they count towards the deflated-Sharpe trial number and dispersion."""
@@ -266,8 +267,8 @@ def evaluate(
         )
     rep = EvaluationReport(table, wf, selection)
     rep.findings = _findings(rep, benchmark, trial_names, len(trial_irs))
-    rep.methodology = _methodology(benchmark, test_fraction)
-    rep.caveats = _caveats(results)
+    rep.methodology = _methodology(benchmark, test_fraction, rebalance_every)
+    rep.caveats = _caveats(results, rebalance_every)
     return rep
 
 
@@ -310,19 +311,25 @@ def _findings(rep: EvaluationReport, benchmark: str, trials: list[str], n_trials
         )
     if "alphaPVsUniverse" in t.columns:
         vu = t.loc[[n for n in trials if n in t.index]].dropna(subset=["alphaPVsUniverse"])
-        for name, r in vu.iterrows():
-            a, p = _num(r["alphaVsUniverse"]), _num(r["alphaPVsUniverse"])
-            if p < STATS_SIGNIFICANCE_LEVEL:
-                out.append(
-                    f"**{name}** vs the equal-weight universe it picks from: alpha {_fmt(a, '+.1%')}/yr "
-                    f"(p = {_fmt(p, '.3f')}) — "
-                    + (
-                        "it selects better-than-average stocks"
-                        if a > 0
-                        else "it selects worse-than-average stocks"
-                    )
-                    + ", a separate question from beating SPY (not adjusted for multiple testing)."
-                )
+        if not vu.empty:
+            # A second family of tests: Holm step-down adjustment within it.
+            p_sorted = vu["alphaPVsUniverse"].astype(float).sort_values()
+            m = len(p_sorted)
+            holm: dict[str, float] = {}
+            running = 0.0
+            for k, (name, p) in enumerate(p_sorted.items()):
+                running = max(running, min(1.0, (m - k) * float(p)))
+                holm[str(name)] = running
+            raw_sig = int((p_sorted < STATS_SIGNIFICANCE_LEVEL).sum())
+            best = str(p_sorted.index[0])
+            out.append(
+                f"Stock selection vs the equal-weight universe each strategy picks from (a separate question from "
+                f"beating SPY): {raw_sig} of {m} significant before adjustment (≈{m * STATS_SIGNIFICANCE_LEVEL:.1f} "
+                f"expected by chance); best **{best}** alpha {_fmt(_num(vu.at[best, 'alphaVsUniverse']), '+.1%')}/yr, "
+                f"p = {_fmt(float(p_sorted.iloc[0]), '.3f')}, Holm-adjusted p = {_fmt(holm[best], '.3f')}."
+            )
+            for name, hp in holm.items():
+                t.loc[name, "alphaPVsUniverseHolm"] = hp
     sel = rep.selection
     if "best" in sel:
         oos_beats = _num(sel["sharpeOOS"]) > _num(sel["benchSharpeOOS"])
@@ -356,10 +363,27 @@ def _findings(rep: EvaluationReport, benchmark: str, trials: list[str], n_trials
     return out
 
 
-def _methodology(benchmark: str, test_fraction: float) -> list[str]:
+_CADENCE = {1: "Monthly", 3: "Quarterly", 6: "Semi-annual", 12: "Annual"}
+
+
+def _methodology(benchmark: str, test_fraction: float, rebalance_every: int = 1) -> list[str]:
+    cadence = _CADENCE.get(rebalance_every, f"Every-{rebalance_every}-month")
+    drift = (
+        f" Between rebalances (every {rebalance_every} months) positions drift with the market and nothing trades."
+        if rebalance_every > 1
+        else ""
+    )
     return [
-        "Monthly rebalancing at month-end close; long-only; returns are dividend-adjusted total returns earned the "
-        "FOLLOWING month; transaction costs = turnover × cost bps; uninvested weight earns the 3-month T-bill.",
+        f"{cadence} rebalancing at month-end close; long-only; returns are dividend-adjusted total returns earned the "
+        "FOLLOWING month; transaction costs = turnover × cost bps; uninvested weight earns the 3-month T-bill."
+        + drift,
+        "Top-N strategies hold at most 30% of their names in one sector (best-ranked first; the rest are filled from "
+        "the next-ranked names elsewhere) and weight them equally; rules that hold every qualifying stock are scaled "
+        "to the 30% sector cap instead.",
+        "Fundamental scorecard: the Research Report's own rule (same bands and weights) on point-in-time inputs — "
+        "ROE and net margin, revenue and net-income growth vs the prior full year, current ratio / D/E / interest "
+        "coverage (equity/assets for banks and lenders; unscored for insurers and captive finance), and price vs its "
+        "50/200-day averages. A stock needs a growth score and 3+ dimensions to be ranked.",
         "Point-in-time: fundamentals usable only from max(filing/acceptance date, fiscal year end + 60 days) + 1 day; "
         "universe membership uses market cap = month-end close × shares from the latest filed statement, plus a "
         "liquidity screen (median daily dollar volume over the last 63 sessions ≥ $5m).",
@@ -378,8 +402,28 @@ def _methodology(benchmark: str, test_fraction: float) -> list[str]:
     ]
 
 
-def _caveats(results: dict[str, BacktestResult]) -> list[str]:
-    out = [
+def _caveats(results: dict[str, BacktestResult], rebalance_every: int = 1) -> list[str]:
+    out = []
+    if rebalance_every > 1:
+        out.append(
+            f"Rebalance timing: with a {rebalance_every}-month cadence, results depend on WHICH months the trades fall "
+            "in (anchored to the start date); shifting the anchor by a few months moved annual-rebalance CAGRs by several points "
+            "in testing — compare frequencies with this in mind."
+        )
+    if any(n.startswith("scorecard") for n in results):
+        out.append(
+            "Scorecard business models (bank / insurer / captive finance / ...) use TODAY's FMP sector and industry "
+            "labels and today's config overrides; the captive-finance test uses the static long-run rf assumption so "
+            "the label doesn't flip with the rate cycle."
+        )
+        out.append(
+            "Scorecard rules shared with the live Research Report, now exercised at scale: bank 'revenue' is FMP's gross "
+            "figure (interest income included), so bank revenue growth is inflated in rising-rate years; net-income "
+            "growth from a negative base (losses narrowing, return to profit) can reach the top growth band; lenders "
+            "and BDCs score high on bank-calibrated equity/assets bands; insurers can reach 100 on three dimensions. "
+            "The picks over-weight asset managers, lenders and insurers and under-weight banks and REITs."
+        )
+    out += [
         "Survivorship bias: the stock universe is built from companies listed today; companies that were delisted, "
         "acquired or went bankrupt are absent, which flatters stock strategies (ETF results are less affected).",
         "Sector labels are today's FMP classification, applied to all history.",

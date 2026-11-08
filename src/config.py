@@ -308,6 +308,10 @@ BACKTEST_MIN_EVAL_MONTHS = 24
 # over the last BACKTEST_LIQUIDITY_WINDOW sessions. Keeps thinly traded predecessor listings
 # out (GLXY's pre-Nasdaq OTC line traded 3-134 shares a day but cleared the $2bn cap floor).
 BACKTEST_MIN_DOLLAR_VOLUME = 5e6
+# Scorecard backtests start at the first month where at least this share of eligible stocks has a
+# GROWTH score (it needs two filed full years): before that, the "scorecard" is a 3-dimension model
+# (quality 0.38/0.69 instead of 0.38), which produced all of scorecard_top's edge over SPY.
+BACKTEST_SCORECARD_MIN_GROWTH_COVERAGE = 0.8
 BACKTEST_LIQUIDITY_WINDOW = 63
 # Random-pick placebo: this many seeds, GROSS of costs, judged against the equal-weight universe.
 # Expect about 5% of seeds "significant" at the 5% level; materially more means a biased pipeline.

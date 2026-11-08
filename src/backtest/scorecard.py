@@ -25,7 +25,12 @@ import pandas as pd
 from src.analysis.business_model import classify
 from src.analysis.investment_score import score_business
 from src.backtest.strategies import Context, _full_year, _usd_reporting
-from src.config import SCORE_RATING_BANDS
+from src.config import (
+    BACKTEST_MIN_UNIVERSE,
+    BACKTEST_SCORECARD_MIN_GROWTH_COVERAGE,
+    DCF_RISK_FREE_RATE,
+    SCORE_RATING_BANDS,
+)
 from src.utils.logging import get_logger
 
 logger = get_logger("backtest.scorecard")
@@ -64,6 +69,8 @@ def stock_inputs(sym: str, row: pd.Series, ctx: Context) -> dict[str, Any]:
     ma50 = _f(d.ma50.at[t, sym]) if sym in d.ma50.columns and t in d.ma50.index else None
     ma200 = _f(d.ma200.at[t, sym]) if sym in d.ma200.columns and t in d.ma200.index else None
     equity = _f(row.get("equity"))
+    if equity == 0:
+        equity = None  # zero equity is a data gap (KKR FY2017), not negative equity
     profile = {
         "symbol": sym,
         "sector": d.sectors.get(sym),
@@ -81,8 +88,10 @@ def stock_inputs(sym: str, row: pd.Series, ctx: Context) -> dict[str, Any]:
         "netReceivables": _f(row.get("netReceivables")),
         "accountPayables": _f(row.get("accountPayables")),
     }
-    rf_annual = float(d.rf.get(t, 0.0)) * 12
-    bm = classify(profile, income, balance, risk_free_rate=rf_annual)
+    # Business model is a STRUCTURAL label: the captive-finance cost-of-debt test is run against the
+    # static long-run rf assumption, not the T-bill of the day — with T-bills near 0 (2020-21) the
+    # test can't fire and F/GM flipped between captive and standard with the rate regime.
+    bm = classify(profile, income, balance, risk_free_rate=DCF_RISK_FREE_RATE)
     interest = _f(row.get("interestExpense"))
     coverage = _ratio(row.get("operatingIncome"), interest) if interest and interest > 0 else None
     return {
@@ -121,7 +130,8 @@ def scores_at(ctx: Context) -> pd.DataFrame:
     rows = []
     for sym, row in f.iterrows():
         try:
-            dims, composite, rating = score_business(stock_inputs(str(sym), row, ctx))
+            inputs = stock_inputs(str(sym), row, ctx)
+            dims, composite, rating = score_business(inputs)
         except Exception as exc:  # one bad company never kills a rebalance
             logger.warning("Scorecard failed for %s at %s: %s", sym, ctx.t.date(), exc)
             continue
@@ -133,6 +143,7 @@ def scores_at(ctx: Context) -> pd.DataFrame:
                 **{k: dims[k]["score"] for k in DIMENSIONS},
                 "composite": composite,
                 "rating": rating,
+                "businessModel": inputs["businessModel"],
                 "fiscalPeriod": pd.Timestamp(row["periodEnd"]).strftime("%Y-%m"),
                 "dimensionsScored": sum(dims[k]["score"] is not None for k in DIMENSIONS),
             }
@@ -150,8 +161,30 @@ def _tiebreak(ctx: Context, idx: pd.Index) -> pd.Series:
 
 
 def _eligible(sc: pd.DataFrame, min_dims: int) -> pd.DataFrame:
-    # a composite resting on one dimension (e.g. momentum only) isn't a fundamental view
-    return sc[sc["dimensionsScored"] >= min_dims] if not sc.empty else sc
+    """A composite resting on few dimensions isn't the scorecard: need `min_dims` scored AND growth
+    (growth is missing only when two full filed years don't exist yet — renormalising it away
+    tests a different model)."""
+    if sc.empty:
+        return sc
+    return sc[(sc["dimensionsScored"] >= min_dims) & sc["growth"].notna()]
+
+
+def first_full_scorecard(data: Any, start: str | None = None) -> pd.Timestamp | None:
+    """First month-end (>= start) where >= BACKTEST_SCORECARD_MIN_GROWTH_COVERAGE of the eligible
+    universe has a growth score, i.e. the full four-dimension scorecard is in force."""
+    from src.backtest.strategies import universe_at
+
+    lo = pd.Timestamp(start) if start else None
+    for t in pd.DatetimeIndex(data.returns.index):
+        if lo is not None and t < lo:
+            continue
+        uni, fund, cap = universe_at(data, t)
+        if len(uni) < BACKTEST_MIN_UNIVERSE:
+            continue
+        sc = scores_at(Context(t=t, data=data, universe=uni, fundamentals=fund, market_cap=cap))
+        if not sc.empty and float(sc["growth"].notna().mean()) >= BACKTEST_SCORECARD_MIN_GROWTH_COVERAGE:
+            return t
+    return None
 
 
 def scorecard_top(ctx: Context) -> pd.Series:

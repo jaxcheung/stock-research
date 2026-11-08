@@ -283,7 +283,7 @@ STRATEGIES: dict[str, Strategy] = {
             "scorecard_value",
             "stock",
             _scorecard("scorecard_value"),
-            "Fundamental scorecard Buy-rated AND E/P above the universe median (separate value screen)",
+            "Fundamental scorecard: top N by score among Buy-rated stocks with E/P >= universe median (separate value screen)",
         ),
         Strategy("sector_momentum", "etf", sector_momentum, "Top 3 sector ETFs by 12-1 momentum", top_n=3),
         Strategy(

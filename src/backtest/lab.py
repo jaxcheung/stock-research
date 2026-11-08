@@ -23,6 +23,7 @@ from src.config import (
     BACKTEST_MIN_EVAL_MONTHS,
     BACKTEST_MIN_UNIVERSE,
     BACKTEST_PLACEBO_SEEDS,
+    BACKTEST_SCORECARD_MIN_GROWTH_COVERAGE,
     BACKTEST_TOP_N,
     STATS_SIGNIFICANCE_LEVEL,
 )
@@ -83,6 +84,18 @@ def run_lab(
                 "alone for the longer history."
             )
             start = first.strftime("%Y-%m-%d")
+    if any(n.startswith("scorecard") for n in names):
+        from src.backtest.scorecard import first_full_scorecard
+
+        full = first_full_scorecard(data, start)
+        if full is not None and (start is None or full > pd.Timestamp(start)):
+            notes.append(
+                f"The fundamental scorecard's growth dimension needs two filed full years, so it covers "
+                f"≥ {BACKTEST_SCORECARD_MIN_GROWTH_COVERAGE:.0%} of the universe only from {full:%Y-%m}; the suite "
+                "starts there (earlier months would test a 3-dimension model — it produced all of the scorecard's "
+                "apparent edge over SPY)."
+            )
+            start = full.strftime("%Y-%m-%d")
     results: dict[str, BacktestResult] = {}
     for n in names:
         logger.info("Backtesting %s", n)
@@ -115,6 +128,7 @@ def run_lab(
         benchmark=bench,
         controls=tuple(c for c in (*CONTROLS, "placebo_random") if c in results),
         prior_trial_irs=prior,
+        rebalance_every=rebalance_every,
     )
     if record_trials:
         b = results[bench].returns
@@ -124,7 +138,15 @@ def run_lab(
                 trials.record(n, params, sharpe_annual(a.to_numpy(dtype=float)), len(a))
     placebo: dict[str, Any] = {}
     if placebo_seeds and "universe_ew" in results:
-        placebo = run_placebo(data, results["universe_ew"], placebo_seeds, start, end)
+        placebo = run_placebo(
+            data,
+            results["universe_ew"],
+            placebo_seeds,
+            start,
+            end,
+            rebalance_every=rebalance_every,
+            top_n=top_n,
+        )
         ev.findings.append(placebo["finding"])
     ev.caveats.extend(n for n in data.notes if n.startswith("Universe source"))
     for r in results.values():
@@ -133,7 +155,13 @@ def run_lab(
 
 
 def run_placebo(
-    data: BacktestData, universe_ew: BacktestResult, seeds: int, start: str | None, end: str | None
+    data: BacktestData,
+    universe_ew: BacktestResult,
+    seeds: int,
+    start: str | None,
+    end: str | None,
+    rebalance_every: int = 1,
+    top_n: int | None = None,
 ) -> dict[str, Any]:
     """Random-pick portfolios over many seeds, GROSS of costs, each regressed on the equal-weight
     universe's gross return (HAC). With an unbiased pipeline about a `STATS_SIGNIFICANCE_LEVEL` share of seeds look significant
@@ -142,7 +170,15 @@ def run_placebo(
     rf = data.rf
     rows = []
     for seed in range(seeds):
-        r = run_backtest(make_placebo(seed), data, start=start, end=end, cost_bps=0.0).gross
+        r = run_backtest(
+            make_placebo(seed),
+            data,
+            start=start,
+            end=end,
+            cost_bps=0.0,
+            rebalance_every=rebalance_every,  # same cadence as the suite, so drift/hold is tested too
+            top_n=top_n,
+        ).gross
         df = pd.concat([r.rename("p"), ref.rename("u")], axis=1).dropna()
         if len(df) < BACKTEST_MIN_EVAL_MONTHS:
             continue

@@ -69,8 +69,16 @@ def simulate(
 
             uni, fund, cap = universe_at(data, t)
             sc = scores_at(Context(t=t, data=data, universe=uni, fundamentals=fund, market_cap=cap))
-            cols = [*DIMENSIONS, "composite", "rating", "fiscalPeriod"]
+            cols = [*DIMENSIONS, "composite", "rating", "businessModel", "fiscalPeriod"]
             h = h.join(sc.reindex(h.index)[cols]) if not sc.empty else h
+            if strat.name == "scorecard_value":
+                # the separate valuation leg: E/P vs the universe median it had to beat (USD reporters)
+                from src.backtest.strategies import _full_year, _usd_reporting
+
+                f = _usd_reporting(_full_year(fund.reindex(uni)))
+                ep = (f["netIncome"] / cap.reindex(f.index)).replace([np.inf, -np.inf], np.nan).dropna()
+                h["earningsYield"] = ep.reindex(h.index)
+                h["universeMedianEY"] = float(ep.median()) if not ep.empty else np.nan
         holdings[t] = h.sort_values("weight", ascending=False)
         cash = max(0.0, 1.0 - float(w.sum()))
         sec = h.groupby("sector")["weight"].sum()

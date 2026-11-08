@@ -235,14 +235,18 @@ def _simulator_tab() -> None:
     end_v, end_b = float(sim.value.iloc[-1]), float(sim.benchmark_value.iloc[-1])
     ui.kpi_row(
         [
-            Kpi("Final value", f"${end_v:,.0f}", f"SPY: ${end_b:,.0f}"),
-            Kpi("CAGR", f"{row['cagr']:.1%}", f"SPY {brow['cagr']:.1%}"),
-            Kpi("Sharpe", f"{row['sharpe']:.2f}", f"SPY {brow['sharpe']:.2f}"),
-            Kpi("Max drawdown", f"{row['maxDrawdown']:.0%}", f"SPY {brow['maxDrawdown']:.0%}"),
             Kpi(
                 "Alpha vs SPY",
                 f"{row.get('alphaAnnual', float('nan')):+.1%}",
-                f"p = {row.get('alphaP', float('nan')):.2f} (HAC)",
+                f"p = {row.get('alphaP', float('nan')):.2f} (HAC) · beta {row.get('beta', float('nan')):.2f}",
+            ),
+            Kpi("Sharpe", f"{row['sharpe']:.2f}", f"SPY {brow['sharpe']:.2f}"),
+            Kpi("Max drawdown", f"{row['maxDrawdown']:.0%}", f"SPY {brow['maxDrawdown']:.0%}"),
+            Kpi("CAGR", f"{row['cagr']:.1%}", f"SPY {brow['cagr']:.1%}"),
+            Kpi(
+                "Final value",
+                f"${end_v:,.0f}",
+                f"SPY ${end_b:,.0f} · not risk-adjusted",
             ),
         ]
     )
@@ -260,14 +264,28 @@ def _simulator_tab() -> None:
         f"{len(h)} positions · cash {cash:.1%} · portfolio value ${float(sim.value.get(when, float('nan'))):,.0f}. "
         "Scores are what the scorecard saw on that date, from the latest annual statement filed by then "
         "(fiscal period shown)."
+        + (
+            " Valuation is a SEPARATE screen here: earnings yield had to be at or above the universe median "
+            "(shown); it is not part of the composite score."
+            if "earningsYield" in h.columns
+            else ""
+        )
     )
     fmt: dict[Any, str | Callable[[object], str] | None] = {
         "weight": "{:.1%}",
         "value": "${:,.0f}",
         "composite": "{:.0f}",
+        "earningsYield": "{:.1%}",
+        "universeMedianEY": "{:.1%}",
     }
     fmt.update({k: "{:.0f}" for k in ("quality", "growth", "financialHealth", "momentum") if k in h.columns})
-    st.dataframe(h.style.format(fmt, na_rep="n/m"), width="stretch")
+    st.dataframe(h.style.format(fmt, na_rep="n/a"), width="stretch")
+    if "businessModel" in h.columns:
+        mix = h["businessModel"].value_counts()
+        st.caption(
+            "Business models held: " + ", ".join(f"{k} {v}" for k, v in mix.items()) + ". "
+            "n/a = not scored (no data, or not applicable to that business model, e.g. insurers' financial health)."
+        )
     tr = sim.trades[sim.trades["date"] == when].drop(columns="date")
     with st.expander(f"Trades on {when:%Y-%m} ({len(tr)})"):
         st.dataframe(

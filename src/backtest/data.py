@@ -24,6 +24,7 @@ from src.config import (
     BACKTEST_SECTOR_ETFS,
     FISCAL_YEAR_END_GRACE_DAYS,
     STORE_DIR,
+    STUB_STATEMENT_ASSET_RATIO,
 )
 from src.data import store
 from src.data.store import StoreDB
@@ -56,23 +57,46 @@ WITH raw AS (
         PARTITION BY symbol, year(periodEnd - INTERVAL {grace} DAY)
         ORDER BY fullYear DESC, (coalesce(revenue, 0) > 0) DESC, periodEnd DESC
     ) = 1
-), b AS (
+), b0 AS (
     SELECT symbol, CAST(date AS DATE) AS periodEnd,
-           totalAssets, totalStockholdersEquity AS equity, totalDebt,
+           totalAssets, totalStockholdersEquity AS equity, totalLiabilities, totalDebt,
            totalCurrentAssets, totalCurrentLiabilities, netReceivables, accountPayables
     FROM balance_annual WHERE period = 'FY'
+), b1 AS (
+    -- Stub balance rows (data_quality.is_stub_balance: equity AND liabilities zero with assets > 0,
+    -- or assets under {stub_ratio} of the prior period — CR FY2019 all zeros, RJF FY2026) are never
+    -- read as real: the prior period's balance sheet is used instead, flagged balanceStub.
+    SELECT *,
+           (coalesce(totalAssets, 0) > 0 AND coalesce(equity, 0) = 0 AND coalesce(totalLiabilities, 0) = 0)
+           OR (lag(totalAssets) OVER w > 0 AND coalesce(totalAssets, 0) < {stub_ratio} * lag(totalAssets) OVER w)
+               AS balanceStub,
+           lag(totalAssets) OVER w AS pTotalAssets, lag(equity) OVER w AS pEquity,
+           lag(totalDebt) OVER w AS pTotalDebt, lag(totalCurrentAssets) OVER w AS pTCA,
+           lag(totalCurrentLiabilities) OVER w AS pTCL, lag(netReceivables) OVER w AS pRecv,
+           lag(accountPayables) OVER w AS pPay
+    FROM b0 WINDOW w AS (PARTITION BY symbol ORDER BY periodEnd)
+), b AS (
+    SELECT symbol, periodEnd, balanceStub,
+           CASE WHEN balanceStub THEN pTotalAssets ELSE totalAssets END AS totalAssets,
+           CASE WHEN balanceStub THEN pEquity ELSE equity END AS equity,
+           CASE WHEN balanceStub THEN pTotalDebt ELSE totalDebt END AS totalDebt,
+           CASE WHEN balanceStub THEN pTCA ELSE totalCurrentAssets END AS totalCurrentAssets,
+           CASE WHEN balanceStub THEN pTCL ELSE totalCurrentLiabilities END AS totalCurrentLiabilities,
+           CASE WHEN balanceStub THEN pRecv ELSE netReceivables END AS netReceivables,
+           CASE WHEN balanceStub THEN pPay ELSE accountPayables END AS accountPayables
+    FROM b1
 ), c AS (
     SELECT symbol, CAST(date AS DATE) AS periodEnd, freeCashFlow
     FROM cashflow_annual WHERE period = 'FY'
 ), j AS (
-    SELECT i.*, b.totalAssets, b.equity, b.totalDebt, b.totalCurrentAssets, b.totalCurrentLiabilities,
+    SELECT i.*, coalesce(b.balanceStub, FALSE) AS balanceStub, b.totalAssets, b.equity, b.totalDebt, b.totalCurrentAssets, b.totalCurrentLiabilities,
            b.netReceivables, b.accountPayables, c.freeCashFlow,
            lag(i.revenue) OVER w AS lagRevenue, lag(i.netIncome) OVER w AS lagNetIncome, lag(i.periodEnd) OVER w AS lagPeriodEnd,
            lag(i.fullYear) OVER w AS lagFullYear
     FROM i LEFT JOIN b USING (symbol, periodEnd) LEFT JOIN c USING (symbol, periodEnd)
     WINDOW w AS (PARTITION BY i.symbol ORDER BY i.periodEnd)
 )
-SELECT symbol, periodEnd, currency, fullYear,
+SELECT symbol, periodEnd, currency, fullYear, balanceStub,
        greatest(coalesce(filed, periodEnd + INTERVAL {min_lag} DAY), periodEnd + INTERVAL {min_lag} DAY)
            + INTERVAL {lag} DAY AS availableFrom,
        revenue, grossProfit, operatingIncome, netIncome, shares,
@@ -187,6 +211,7 @@ def load_backtest_data(symbols: list[str] | None = None, db: StoreDB | None = No
             min_lag=int(BACKTEST_MIN_REPORT_LAG_DAYS),
             lag=int(BACKTEST_FILING_LAG_DAYS),
             grace=int(FISCAL_YEAR_END_GRACE_DAYS),
+            stub_ratio=float(STUB_STATEMENT_ASSET_RATIO),
         )
     )
     pit["availableFrom"] = pd.to_datetime(pit["availableFrom"])
