@@ -144,6 +144,9 @@ def scores_at(ctx: Context) -> pd.DataFrame:
                 "composite": composite,
                 "rating": rating,
                 "businessModel": inputs["businessModel"],
+                # health is unscored BY DESIGN for insurers and captive finance; otherwise a missing
+                # health score is a data gap, which must not become a ranking advantage
+                "healthByDesign": inputs["businessModel"] == "insurer" or bool(inputs["captiveFinance"]),
                 "fiscalPeriod": pd.Timestamp(row["periodEnd"]).strftime("%Y-%m"),
                 "dimensionsScored": sum(dims[k]["score"] is not None for k in DIMENSIONS),
             }
@@ -163,10 +166,12 @@ def _tiebreak(ctx: Context, idx: pd.Index) -> pd.Series:
 def _eligible(sc: pd.DataFrame, min_dims: int) -> pd.DataFrame:
     """A composite resting on few dimensions isn't the scorecard: need `min_dims` scored AND growth
     (growth is missing only when two full filed years don't exist yet — renormalising it away
-    tests a different model)."""
+    tests a different model), and financial health unless it is unscored by design (insurer,
+    captive finance) — renormalising a data gap lifted KKR FY2017 to a composite of 100."""
     if sc.empty:
         return sc
-    return sc[(sc["dimensionsScored"] >= min_dims) & sc["growth"].notna()]
+    health_ok = sc["financialHealth"].notna() | sc["healthByDesign"].astype(bool)
+    return sc[(sc["dimensionsScored"] >= min_dims) & sc["growth"].notna() & health_ok]
 
 
 def first_full_scorecard(data: Any, start: str | None = None) -> pd.Timestamp | None:

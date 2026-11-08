@@ -92,8 +92,7 @@ def run_lab(
             notes.append(
                 f"The fundamental scorecard's growth dimension needs two filed full years, so it covers "
                 f"≥ {BACKTEST_SCORECARD_MIN_GROWTH_COVERAGE:.0%} of the universe only from {full:%Y-%m}; the suite "
-                "starts there (earlier months would test a 3-dimension model — it produced all of the scorecard's "
-                "apparent edge over SPY)."
+                "starts there (earlier months would test a different, 3-dimension model)."
             )
             start = full.strftime("%Y-%m-%d")
     results: dict[str, BacktestResult] = {}

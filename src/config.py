@@ -310,7 +310,8 @@ BACKTEST_MIN_EVAL_MONTHS = 24
 BACKTEST_MIN_DOLLAR_VOLUME = 5e6
 # Scorecard backtests start at the first month where at least this share of eligible stocks has a
 # GROWTH score (it needs two filed full years): before that, the "scorecard" is a 3-dimension model
-# (quality 0.38/0.69 instead of 0.38), which produced all of scorecard_top's edge over SPY.
+# (quality 0.38/0.69 instead of 0.38); in testing that first year produced all of scorecard_top's
+# apparent edge over SPY.
 BACKTEST_SCORECARD_MIN_GROWTH_COVERAGE = 0.8
 BACKTEST_LIQUIDITY_WINDOW = 63
 # Random-pick placebo: this many seeds, GROSS of costs, judged against the equal-weight universe.
