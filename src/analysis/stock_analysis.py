@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from src.analysis.business_model import classify
+from src.analysis.business_model import classify, revenue_pair, scorecard_revenue, yoy_growth
 from src.analysis.data_quality import check_statements, latest_complete_balance
 from src.analysis.dcf import live_risk_free_rate
 from src.data.fmp_client import FMPClient, FMPError
@@ -12,9 +12,7 @@ logger = get_logger("stock_analysis")
 
 
 def _growth(current: float | None, prior: float | None) -> float | None:
-    if current is None or prior in (None, 0):
-        return None
-    return (current - prior) / abs(prior)
+    return yoy_growth(current, prior)  # one rule for live and backtest (business_model.yoy_growth)
 
 
 def analyze_stock(symbol: str, client: FMPClient | None = None, years: int = 5) -> dict[str, Any]:
@@ -81,8 +79,27 @@ def analyze_stock(symbol: str, client: FMPClient | None = None, years: int = 5) 
     total_assets = latest_bs.get("totalAssets")
     equity_to_assets = total_equity / total_assets if total_equity is not None and total_assets else None
 
+    # Banks / broker-dealers / card lenders: revenue net of interest expense (scorecard_revenue)
+    rev_now, rev_prior, basis = revenue_pair(latest_income, prior_income or None, model.kind, model.subtype)
+    net_basis = rev_now is not None and rev_now != latest_income.get("revenue")
+    net_margin = latest_ratios.get("netProfitMargin")
+    if net_basis and rev_now and latest_income.get("netIncome") is not None:
+        net_margin = float(latest_income["netIncome"]) / rev_now
+    prior_ni = prior_income.get("netIncome")
+
     revenue_history = [
-        {"date": row.get("date"), "revenue": row.get("revenue"), "netIncome": row.get("netIncome")}
+        {
+            "date": row.get("date"),
+            "revenue": row.get("revenue"),
+            # only years FMP reports GROSS get a net figure; others are None (shown as n/m), never
+            # a reported figure presented as "net" (TFC FY2024)
+            "netRevenue": (
+                net
+                if (net := scorecard_revenue(row, model.kind, model.subtype)) != row.get("revenue")
+                else None
+            ),
+            "netIncome": row.get("netIncome"),
+        }
         for row in income
     ]
 
@@ -112,14 +129,21 @@ def analyze_stock(symbol: str, client: FMPClient | None = None, years: int = 5) 
         "profitability": {
             "grossProfitMargin": latest_ratios.get("grossProfitMargin"),
             "operatingProfitMargin": latest_ratios.get("operatingProfitMargin"),
-            "netProfitMargin": latest_ratios.get("netProfitMargin"),
+            "netProfitMargin": net_margin,
             "returnOnEquity": latest_metrics.get("returnOnEquity"),
             "returnOnAssets": latest_metrics.get("returnOnAssets"),
             "returnOnInvestedCapital": latest_metrics.get("returnOnInvestedCapital"),
         },
         "growth": {
-            "revenueGrowthYoY": _growth(latest_income.get("revenue"), prior_income.get("revenue")),
-            "netIncomeGrowthYoY": _growth(latest_income.get("netIncome"), prior_income.get("netIncome")),
+            "revenueGrowthYoY": _growth(rev_now, rev_prior),
+            "netIncomeGrowthYoY": _growth(latest_income.get("netIncome"), prior_ni),
+            # basis "mixed" wins: growth is n/m because FMP switched presentation between the years
+            "revenueBasis": "changed between years"
+            if basis == "mixed"
+            else "net of interest expense"
+            if net_basis
+            else "reported",
+            "priorNetIncomeNonPositive": prior_ni is not None and prior_ni <= 0,
         },
         "leverage": {
             "currentRatio": latest_ratios.get("currentRatio"),
@@ -170,7 +194,8 @@ def summarize_stock(symbol: str, client: FMPClient | None = None) -> str:
         f"- ROE: {pct(p['returnOnEquity'])}  |  ROA: {pct(p['returnOnAssets'])}  |  ROIC: {pct(p['returnOnInvestedCapital'])}",
         "",
         "## Growth (YoY)",
-        f"- Revenue: {pct(g['revenueGrowthYoY'])}  |  Net income: {pct(g['netIncomeGrowthYoY'])}",
+        f"- Revenue ({g.get('revenueBasis', 'reported')}): {pct(g['revenueGrowthYoY'])}  |  "
+        f"Net income: {pct(g['netIncomeGrowthYoY'])}",
         "",
         "## Leverage & Liquidity",
         f"- Current ratio: {num(lev['currentRatio'])}  |  Quick ratio: {num(lev['quickRatio'])}  |  Debt/Equity: {num(lev['debtToEquityRatio'])}  |  Interest coverage: {num(lev['interestCoverageRatio'])}",

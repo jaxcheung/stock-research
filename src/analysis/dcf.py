@@ -351,6 +351,19 @@ def run_dcf(
         "businessModel": model.kind,
         "dataNotes": ([bs_note] if bs_note else [])
         + ([cf_note] if cf_note else [])
+        + (
+            [
+                f"Net debt includes {leases:,.0f} of lease liabilities while free cash flow is already after rent, "
+                "so leases are counted twice and intrinsic value is understated (FMP does not split finance from "
+                "operating leases, so this is not corrected)."
+            ]
+            if (
+                leases := (latest_bs.get("capitalLeaseObligationsCurrent") or 0.0)
+                + (latest_bs.get("capitalLeaseObligationsNonCurrent") or 0.0)
+            )
+            > 0
+            else []
+        )
         + [
             f"[{i.check}{' · ' + i.period if i.period else ''}] {i.message}"
             for i in check_statements(income, balance_rows, cash_rows).warnings

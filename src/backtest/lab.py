@@ -25,6 +25,7 @@ from src.config import (
     BACKTEST_PLACEBO_SEEDS,
     BACKTEST_SCORECARD_MIN_GROWTH_COVERAGE,
     BACKTEST_TOP_N,
+    SCORECARD_RULES_VERSION,
     STATS_SIGNIFICANCE_LEVEL,
 )
 from src.utils.logging import get_logger
@@ -114,8 +115,13 @@ def run_lab(
     if top_n is not None and top_n != BACKTEST_TOP_N:
         params["topN"] = top_n  # the default is omitted: the same configuration is ONE trial
     tried = [n for n in results if n not in NON_TRIALS and n != bench]
+
+    def trial_params(n: str) -> dict[str, Any]:
+        # A scorecard RULE revision is a new trial (rules changed after seeing results must count).
+        return {**params, "scorecardRules": SCORECARD_RULES_VERSION} if n.startswith("scorecard") else params
+
     ledger = trials.load()
-    keys = {trials.trial_key(n, params) for n in tried}
+    keys = {trials.trial_key(n, trial_params(n)) for n in tried}
     prior = [
         float(v)
         for k, v in zip(ledger["key"], ledger["info_ratio"], strict=True)
@@ -134,7 +140,7 @@ def run_lab(
         for n in tried:
             a = (results[n].returns - b).dropna()
             if len(a) >= BACKTEST_MIN_EVAL_MONTHS:
-                trials.record(n, params, sharpe_annual(a.to_numpy(dtype=float)), len(a))
+                trials.record(n, trial_params(n), sharpe_annual(a.to_numpy(dtype=float)), len(a))
     if rebalance_every > 1:
         _anchor_range(ev, results, data, tried, bench, start, end, cost_bps, top_n, rebalance_every)
     placebo: dict[str, Any] = {}

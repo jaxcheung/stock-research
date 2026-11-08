@@ -224,9 +224,13 @@ def _identify_risks(report: dict[str, Any]) -> list[str]:
             risks.append(f"Liquidity risk: current ratio of {leverage['currentRatio']:.2f} is below 1.0x.")
 
     if growth["revenueGrowthYoY"] is not None and growth["revenueGrowthYoY"] < 0:
-        risks.append(f"Revenue declined {abs(growth['revenueGrowthYoY']):.1%} YoY.")
+        label = "Net revenue" if growth.get("revenueBasis") == "net of interest expense" else "Revenue"
+        risks.append(f"{label} declined {abs(growth['revenueGrowthYoY']):.1%} YoY.")
     if growth["netIncomeGrowthYoY"] is not None and growth["netIncomeGrowthYoY"] < 0:
-        risks.append(f"Net income declined {abs(growth['netIncomeGrowthYoY']):.1%} YoY.")
+        if growth.get("priorNetIncomeNonPositive"):
+            risks.append(f"Net loss widened {abs(growth['netIncomeGrowthYoY']):.1%} YoY.")
+        else:
+            risks.append(f"Net income declined {abs(growth['netIncomeGrowthYoY']):.1%} YoY.")
 
     if profitability["netProfitMargin"] is not None and profitability["netProfitMargin"] < 0:
         risks.append("Currently unprofitable (negative net margin).")
@@ -413,17 +417,31 @@ def render_research_report(
     if history:
         ccy = stock.get("reportingCurrency") or stock.get("quoteCurrency")
         lines.append(f"*Amounts in reporting currency ({ccy or 'n/a'})*")
-        lines.append("| Year | Revenue | Net Income | Net Margin |")
-        lines.append("|---|---|---|---|")
-        for row in history:
-            margin = (
-                row["netIncome"] / row["revenue"]
-                if row.get("revenue") and row.get("netIncome") is not None
-                else None
-            )
-            margin_str = f"{margin:.1%}" if margin is not None else "n/a"
+        net_rows = any(
+            r.get("netRevenue") is not None and r.get("netRevenue") != r.get("revenue") for r in history
+        )
+        if net_rows:
+            # Banks / broker-dealers / card lenders: FMP's revenue is gross of interest expense; the
+            # scorecard uses net revenue, so the table shows both and the margin on net revenue.
             lines.append(
-                f"| {row['date']} | {money(row.get('revenue'), ccy)} | {money(row.get('netIncome'), ccy)} | {margin_str} |"
+                "*Revenue is FMP's reported figure (gross of interest expense); net revenue = revenue − interest "
+                "expense, the basis the scorecard uses. Net margin is on net revenue.*"
+            )
+            lines.append("| Year | Revenue (reported) | Net revenue | Net Income | Net Margin |")
+            lines.append("|---|---|---|---|---|")
+        else:
+            lines.append("| Year | Revenue | Net Income | Net Margin |")
+            lines.append("|---|---|---|---|")
+        for row in history:
+            base = row.get("netRevenue") if net_rows else row.get("revenue")
+            margin = row["netIncome"] / base if base and row.get("netIncome") is not None else None
+            margin_str = f"{margin:.1%}" if margin is not None else ("n/m" if net_rows else "n/a")
+            if net_rows and row.get("netRevenue") is None:
+                mid = " n/m (FMP presentation not gross) |"
+            else:
+                mid = f" {money(row.get('netRevenue'), ccy)} |" if net_rows else ""
+            lines.append(
+                f"| {row['date']} | {money(row.get('revenue'), ccy)} |{mid} {money(row.get('netIncome'), ccy)} | {margin_str} |"
             )
     else:
         lines.append("No historical data available.")

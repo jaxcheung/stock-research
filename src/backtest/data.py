@@ -60,7 +60,8 @@ WITH raw AS (
 ), b0 AS (
     SELECT symbol, CAST(date AS DATE) AS periodEnd,
            totalAssets, totalStockholdersEquity AS equity, totalLiabilities, totalDebt,
-           totalCurrentAssets, totalCurrentLiabilities, netReceivables, accountPayables
+           totalCurrentAssets, totalCurrentLiabilities, netReceivables, accountPayables,
+           capitalLeaseObligationsCurrent AS leasesCurrent, capitalLeaseObligationsNonCurrent AS leasesNonCurrent
     FROM balance_annual WHERE period = 'FY'
 ), b1 AS (
     -- Stub balance rows (data_quality.is_stub_balance: equity AND liabilities zero with assets > 0,
@@ -73,7 +74,8 @@ WITH raw AS (
            lag(totalAssets) OVER w AS pTotalAssets, lag(equity) OVER w AS pEquity,
            lag(totalDebt) OVER w AS pTotalDebt, lag(totalCurrentAssets) OVER w AS pTCA,
            lag(totalCurrentLiabilities) OVER w AS pTCL, lag(netReceivables) OVER w AS pRecv,
-           lag(accountPayables) OVER w AS pPay
+           lag(accountPayables) OVER w AS pPay, lag(leasesCurrent) OVER w AS pLC,
+           lag(leasesNonCurrent) OVER w AS pLNC
     FROM b0 WINDOW w AS (PARTITION BY symbol ORDER BY periodEnd)
 ), b AS (
     SELECT symbol, periodEnd, balanceStub,
@@ -83,15 +85,19 @@ WITH raw AS (
            CASE WHEN balanceStub THEN pTCA ELSE totalCurrentAssets END AS totalCurrentAssets,
            CASE WHEN balanceStub THEN pTCL ELSE totalCurrentLiabilities END AS totalCurrentLiabilities,
            CASE WHEN balanceStub THEN pRecv ELSE netReceivables END AS netReceivables,
-           CASE WHEN balanceStub THEN pPay ELSE accountPayables END AS accountPayables
+           CASE WHEN balanceStub THEN pPay ELSE accountPayables END AS accountPayables,
+           CASE WHEN balanceStub THEN pLC ELSE leasesCurrent END AS leasesCurrent,
+           CASE WHEN balanceStub THEN pLNC ELSE leasesNonCurrent END AS leasesNonCurrent
     FROM b1
 ), c AS (
     SELECT symbol, CAST(date AS DATE) AS periodEnd, freeCashFlow
     FROM cashflow_annual WHERE period = 'FY'
 ), j AS (
     SELECT i.*, coalesce(b.balanceStub, FALSE) AS balanceStub, b.totalAssets, b.equity, b.totalDebt, b.totalCurrentAssets, b.totalCurrentLiabilities,
-           b.netReceivables, b.accountPayables, c.freeCashFlow,
-           lag(i.revenue) OVER w AS lagRevenue, lag(i.netIncome) OVER w AS lagNetIncome, lag(i.periodEnd) OVER w AS lagPeriodEnd,
+           b.netReceivables, b.accountPayables, b.leasesCurrent, b.leasesNonCurrent, c.freeCashFlow,
+           lag(i.revenue) OVER w AS lagRevenue, lag(i.netIncome) OVER w AS lagNetIncome,
+           lag(i.interestIncome) OVER w AS lagInterestIncome, lag(i.interestExpense) OVER w AS lagInterestExpense,
+           lag(i.netInterestIncome) OVER w AS lagNetInterestIncome, lag(i.periodEnd) OVER w AS lagPeriodEnd,
            lag(i.fullYear) OVER w AS lagFullYear
     FROM i LEFT JOIN b USING (symbol, periodEnd) LEFT JOIN c USING (symbol, periodEnd)
     WINDOW w AS (PARTITION BY i.symbol ORDER BY i.periodEnd)
@@ -105,6 +111,13 @@ SELECT symbol, periodEnd, currency, fullYear, balanceStub,
             THEN lagRevenue END AS prevRevenue,
        CASE WHEN fullYear AND lagFullYear AND periodEnd - lagPeriodEnd BETWEEN 330 AND 400
             THEN lagNetIncome END AS prevNetIncome,
+       CASE WHEN fullYear AND lagFullYear AND periodEnd - lagPeriodEnd BETWEEN 330 AND 400
+            THEN lagInterestIncome END AS prevInterestIncome,
+       CASE WHEN fullYear AND lagFullYear AND periodEnd - lagPeriodEnd BETWEEN 330 AND 400
+            THEN lagInterestExpense END AS prevInterestExpense,
+       CASE WHEN fullYear AND lagFullYear AND periodEnd - lagPeriodEnd BETWEEN 330 AND 400
+            THEN lagNetInterestIncome END AS prevNetInterestIncome,
+       leasesCurrent, leasesNonCurrent,
        interestIncome, interestExpense, netInterestIncome,
        totalAssets, equity, totalDebt, totalCurrentAssets, totalCurrentLiabilities,
        netReceivables, accountPayables, freeCashFlow
